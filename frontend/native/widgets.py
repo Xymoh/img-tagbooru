@@ -325,7 +325,7 @@ class HelpDialog(QtWidgets.QDialog):
         <hr style="border: 1px solid #444;">
         <p style="color: #9ecbff; font-size: 11px;">
             Need help? Check the
-            <a href="https://github.com/your-repo/img-tagger" style="color: #4da6ff;">GitHub repository</a>
+            <a href="https://github.com/Xymoh/img-tagboru-ai" style="color: #4da6ff;">GitHub repository</a>
             or review the README.md file.
         </p>
         """)
