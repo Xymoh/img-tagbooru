@@ -139,8 +139,8 @@ The raw LLM output goes through a deterministic pipeline that ensures quality:
 
 ```powershell
 # Clone the repo
-git clone https://github.com/your-repo/img-tagger.git
-cd img-tagger
+git clone https://github.com/Xymoh/img-tagboru-ai.git
+cd img-tagboru-ai
 
 # Create virtual environment
 python -m venv .venv

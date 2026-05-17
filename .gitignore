@@ -8,7 +8,22 @@ __pycache__/
 .idea/
 .vscode/
 .DS_Store
+.kiro/
 build/
 dist/
 *.spec
 .roo/
+
+# Logs and crash reports
+*.log
+crash_log.txt
+crash.log
+
+# Temp files
+*.tmp
+*.temp
+tmp/
+temp/
+
+# Internal planning notes
+plans/

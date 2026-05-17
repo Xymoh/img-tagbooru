@@ -2,6 +2,11 @@
 
 All notable changes to Img-Tagboru are documented in this file.
 
+## [v1.3.3] - 2026-05-17
+
+#### Support KoFi
+- **Support KoFi** added support kofi button on the bottom of the app as well as within the "Help" modal.
+
 ## [v1.3.2] — 2026-05-15
 
 ### Added

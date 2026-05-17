@@ -939,11 +939,14 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
             "Local Anime Image Tagger\n"
             "WD14-style tagging for anime images and LoRA training.\n\n"
             "Features:\n"
-            "• Local image tagging with WD14 models\n"
+            "• Local image tagging with WD-SwinV2 ONNX model\n"
             "• Batch processing with drag & drop\n"
-            "• Description-to-tags with Ollama LLM\n"
-            "• Export captions for training datasets\n\n"
-            "Built with Python, PyQt6, and Deep Learning.",
+            "• Description-to-tags with local Ollama LLM\n"
+            "• Tag enrichment from seed tags\n"
+            "• Export captions for LoRA training datasets\n\n"
+            "Built with Python, PySide6, and ONNX Runtime.\n\n"
+            "☕ https://ko-fi.com/saekimon\n"
+            "🐙 https://github.com/Xymoh/img-tagboru-ai",
         )
 
     # ==================================================================
