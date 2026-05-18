@@ -1,4 +1,4 @@
-# Img-Tagboru
+# Img-Tagbooru
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Development-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/saekimon)
 
@@ -139,8 +139,8 @@ The raw LLM output goes through a deterministic pipeline that ensures quality:
 
 ```powershell
 # Clone the repo
-git clone https://github.com/Xymoh/img-tagboru-ai.git
-cd img-tagboru-ai
+git clone https://github.com/Xymoh/img-tagbooru.git
+cd img-tagbooru
 
 # Create virtual environment
 python -m venv .venv
@@ -225,7 +225,7 @@ Purpose-built for image prompts. Thinner atmospheric coverage but good for rapid
 .\build_exe.ps1
 ```
 
-Output: `dist\Img-Tagboru.exe`
+Output: `dist\Img-Tagbooru.exe`
 
 GitHub Releases: push a tag like `v1.0.0` and the CI workflow publishes the exe as a release asset.
 
@@ -334,7 +334,7 @@ CORS enabled for `localhost:5173` (Vite dev server).
 
 ## Support the Project
 
-If you find Img-Tagboru useful, consider supporting development:
+If you find Img-Tagbooru useful, consider supporting development:
 
 [![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/saekimon)
 
