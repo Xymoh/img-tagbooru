@@ -6,6 +6,8 @@ A local, offline Danbooru-style image tagging tool for anime/illustration workfl
 
 Built for LoRA trainers, dataset curators, and anyone who needs clean Danbooru-format captions.
 
+This tool serves as a vast expansion of my initial tool: [Tagbooru](https://xymoh.github.io/Tagbooru/) Give it a look, it's a tool to format and categorize your copy pasted tags, for example from Danbooru and output them in a clean way.
+
 ---
 
 ## Features at a Glance
