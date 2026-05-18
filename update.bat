@@ -1,13 +1,13 @@
 @echo off
 cd /d "%~dp0"
 echo ============================================
-echo   Img-Tagboru - Update from GitHub Releases
+echo   Img-Tagbooru - Update from GitHub Releases
 echo ============================================
 echo.
 echo Checking for latest release...
 
 powershell -Command ^
-  "$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Xymoh/img-tagboru-ai/releases/latest' -ErrorAction Stop; ^
+  "$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Xymoh/img-tagbooru/releases/latest' -ErrorAction Stop; ^
    $asset = $release.assets | Where-Object { $_.name -eq 'img-tagger.exe' }; ^
    if ($asset) { ^
      Write-Host 'Latest release:' $release.tag_name; ^

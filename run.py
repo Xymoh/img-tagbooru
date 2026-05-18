@@ -1,4 +1,4 @@
-"""Entry point for Img-Tagboru desktop application.
+"""Entry point for Img-Tagbooru desktop application.
 
 Run with:
     python run.py

@@ -1,4 +1,4 @@
-# Contributing to Img-Tagboru
+# Contributing to Img-Tagbooru
 
 ## Prerequisites
 
@@ -81,7 +81,7 @@ feature/bugfix → develop → main → tag → back-merge
 3. After review, squash-merge into `develop`.
 4. When ready for release, open a PR from `develop` → `main`.
 5. Merge to `main`, tag with `vX.Y.Z`, push the tag.
-6. CI builds and attaches `Img-Tagboru.exe` to the GitHub Release.
+6. CI builds and attaches `Img-Tagbooru.exe` to the GitHub Release.
 7. Back-merge `main` → `develop`.
 
 ## Building the EXE
@@ -90,7 +90,7 @@ feature/bugfix → develop → main → tag → back-merge
 .\build_exe.ps1
 ```
 
-Output: `dist\Img-Tagboru.exe`
+Output: `dist\Img-Tagbooru.exe`
 
 Requirements for the build:
 - PyInstaller installed in venv

@@ -1,4 +1,4 @@
-# Img-Tagboru
+# Img-Tagbooru
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Development-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/saekimon)
 
@@ -139,7 +139,7 @@ The raw LLM output goes through a deterministic pipeline that ensures quality:
 
 ```powershell
 # Clone the repo
-git clone https://github.com/Xymoh/img-tagboru-ai.git
+git clone https://github.com/Xymoh/img-tagbooru-ai.git
 cd img-tagboru-ai
 
 # Create virtual environment

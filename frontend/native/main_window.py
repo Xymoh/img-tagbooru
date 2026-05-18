@@ -51,7 +51,7 @@ from frontend.native.workers import DescriptionTagWorker, ImageLoadWorker, Model
 class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Img-Tagboru v1.3.3")
+        self.setWindowTitle("Img-Tagbooru v1.3.3")
         self.resize(1500, 920)
         self.setMinimumSize(1200, 720)
         self.setAcceptDrops(True)
@@ -934,8 +934,8 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
     def show_about(self) -> None:
         QtWidgets.QMessageBox.about(
             self,
-            "About Img-Tagboru",
-            "Img-Tagboru v1.3.3\n\n"
+            "About Img-Tagbooru",
+            "Img-Tagbooru v1.3.3\n\n"
             "Local Anime Image Tagger\n"
             "WD14-style tagging for anime images and LoRA training.\n\n"
             "Features:\n"
@@ -946,7 +946,7 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
             "• Export captions for LoRA training datasets\n\n"
             "Built with Python, PySide6, and ONNX Runtime.\n\n"
             "☕ https://ko-fi.com/saekimon\n"
-            "🐙 https://github.com/Xymoh/img-tagboru-ai",
+            "🐙 https://github.com/Xymoh/img-tagbooru",
         )
 
     # ==================================================================
@@ -2730,8 +2730,8 @@ def main() -> None:
     )
 
     app = QtWidgets.QApplication([])
-    app.setApplicationName("Img-Tagboru")
-    app.setApplicationDisplayName("Img-Tagboru")
+    app.setApplicationName("Img-Tagbooru")
+    app.setApplicationDisplayName("Img-Tagbooru")
     app.setApplicationVersion("1.3.3")
 
     window = MainWindow()

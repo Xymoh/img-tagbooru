@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to Img-Tagboru are documented in this file.
+All notable changes to Img-Tagbooru are documented in this file.
 
 ## [v1.3.3] - 2026-05-17
 
@@ -113,7 +113,7 @@ All notable changes to Img-Tagboru are documented in this file.
 
 ### Changed
 - Unified all version strings to `v1.3.0` (window title, About dialog, Qt metadata).
-- Build artifact renamed from `img-tagger.exe` to `Img-Tagboru.exe`.
+- Build artifact renamed from `img-tagger.exe` to `Img-Tagbooru.exe`.
 - Replaced all ad-hoc `print()` debug output with Python `logging` module (`logger.debug()`/`logger.info()`/`logger.warning()`).
 - `requirements.txt`: fixed `uvicorn[standard]` → `uvicorn` (bracket extras syntax is `pip`-specific, not standard).
 
