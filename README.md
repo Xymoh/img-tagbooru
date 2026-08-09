@@ -13,6 +13,7 @@ Built for LoRA trainers, dataset curators, and anyone who needs clean Danbooru-f
 | Feature | What it does |
 |---------|-------------|
 | **Image → Tags** | Drop images in, get Danbooru tags with confidence scores |
+| **Switchable Recognition Models** | Download, update, and choose between WD tagger models in-app |
 | **Description → Tags** | Describe a scene in English, get 30-50 Danbooru tags |
 | **Tag Enrichment** | Provide seed tags, get them expanded into a full tag set |
 | **Batch Processing** | Tag entire folders at once |
@@ -23,7 +24,7 @@ Built for LoRA trainers, dataset curators, and anyone who needs clean Danbooru-f
 
 ## Image-to-Tags
 
-Uses an ONNX-based WD-SwinV2 tagger model to classify images into Danbooru tags with confidence scores.
+Uses an ONNX-based WD tagger model to classify images into Danbooru tags with confidence scores. The recognition model is switchable from inside the app (see below).
 
 **Loading images:**
 - Drag & drop files or folders onto the app
@@ -49,6 +50,26 @@ Uses an ONNX-based WD-SwinV2 tagger model to classify images into Danbooru tags 
 - Save All TXT — all captions to a folder
 - Export ZIP — all captions in a ZIP archive
 - Format: `tag1, tag2, tag3` ready for training
+
+### Recognition Model Management
+
+The vision model that recognizes images is now selectable in-app — no config editing or reinstalling required. In the **Batch Tagger** tab, the **🧠 Recognition Model** dropdown (top of *Tagging Settings*) lets you choose the active model, and **⚙️ Manage** opens a manager to download, update, or delete models.
+
+- **Choose:** pick any installed model from the dropdown; each entry shows a description and download state (`✓ installed` / `~size MB`).
+- **Download:** selecting a model that isn't downloaded yet prompts to fetch it (cached under `~/.img_tagger`); the app stays responsive while it downloads in the background.
+- **Update:** re-download a model in the manager to pull the latest weights.
+- **Delete:** remove a downloaded model to reclaim disk space (re-downloadable anytime).
+- **Custom models (advanced):** add any Hugging Face repo that ships `model.onnx` + `selected_tags.csv`.
+
+Your selection is remembered between sessions. All models share the same BGR/square-pad preprocessing, so they are drop-in interchangeable.
+
+| Model | Repo | Notes |
+|-------|------|-------|
+| **WD SwinV2 v3** ⭐ | `SmilingWolf/wd-swinv2-tagger-v3` | Balanced default — proven for LoRA captioning |
+| **WD ViT v3** | `SmilingWolf/wd-vit-tagger-v3` | Slightly faster, comparable quality |
+| **WD ConvNeXt v3** | `SmilingWolf/wd-convnext-tagger-v3` | Alternative architecture for a second opinion |
+| **WD ViT-Large v3** | `SmilingWolf/wd-vit-large-tagger-v3` | Higher accuracy, larger/slower |
+| **WD EVA02-Large v3** | `SmilingWolf/wd-eva02-large-tagger-v3` | Most accurate, largest download |
 
 ---
 
@@ -306,9 +327,11 @@ CORS enabled for `localhost:5173` (Vite dev server).
 ## Technical Details
 
 ### Image Tagger
-- Model: `SmilingWolf/wd-swinv2-tagger-v3` (Hugging Face)
+- Default model: `SmilingWolf/wd-swinv2-tagger-v3` (Hugging Face), switchable in-app
+- Bundled choices: WD SwinV2 / ViT / ConvNeXt / ViT-Large / EVA02-Large (v3), plus custom HF repos
 - Runtime: ONNX (CPU or GPU)
 - Categories: general (0), artist (1), copyright (3), character (4), meta (5)
+- Models are cached under `~/.img_tagger`; the active model is remembered in `~/.img_tagger/config.json`
 
 ### Description Tagger
 - LLM: Ollama + abliterated Qwen3-14B (local, offline)
@@ -329,6 +352,19 @@ CORS enabled for `localhost:5173` (Vite dev server).
 - **Blacklist common noise:** `blurry, lowres, bad_id, bad_pixiv_id, commentary_request`
 - **Re-run descriptions:** Temperature sampling means each run is different — try 2-3 times
 - **Combine both:** Tag an image first, then use those tags as seeds in enrichment mode
+
+---
+
+## Roadmap
+
+These are not confirmed — just things being explored or considered for future versions.
+
+- **Tag translation** — translate Japanese Danbooru tags to English equivalents
+- **Preset tag profiles** — saved configurations for common workflows (LoRA training, prompt generation, minimal clean output)
+- **Optional online LLM support** — opt-in API key support for GPT-4o / Claude as an alternative to local Ollama for the Description Tagger
+- **App localization** — UI translation support for non-English users (long-term)
+
+Have a feature request? Open an issue on [GitHub](https://github.com/Xymoh/img-tagboru-ai/issues).
 
 ---
 

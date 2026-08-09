@@ -3,9 +3,10 @@ from __future__ import annotations
 import csv
 import inspect
 import io
+import json
+import shutil
 import warnings
 from dataclasses import dataclass
-from functools import lru_cache
 from pathlib import Path
 from typing import Iterable, Sequence
 
@@ -15,9 +16,93 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 
 
-MODEL_REPO = "SmilingWolf/wd-swinv2-tagger-v3"
+# Windowed builds (``pythonw`` / PyInstaller ``--windowed``) have no console, so
+# ``sys.stderr`` is None. huggingface_hub draws a tqdm download progress bar to
+# stderr, and writing to None crashes the download with
+# "'NoneType' object has no attribute 'write'". We show our own progress UI, so
+# disable the library's progress bars entirely.
+try:  # pragma: no cover - depends on huggingface_hub version
+    from huggingface_hub.utils import disable_progress_bars
+
+    disable_progress_bars()
+except Exception:
+    pass
+
+
+# The ONNX file name and tags file name are consistent across every WD tagger
+# repo published by SmilingWolf, so they stay constant while the repo varies.
 MODEL_FILE = "model.onnx"
 TAGS_FILE = "selected_tags.csv"
+
+# Default recognition model — kept as the historical name for backward compat
+# (older code / configs may still reference ``MODEL_REPO``).
+DEFAULT_MODEL_REPO = "SmilingWolf/wd-swinv2-tagger-v3"
+MODEL_REPO = DEFAULT_MODEL_REPO
+
+
+@dataclass(frozen=True)
+class TaggerModelInfo:
+    """Metadata for a selectable ONNX image-recognition model."""
+
+    repo_id: str
+    name: str
+    description: str
+    approx_size_mb: int
+    recommended: bool = False
+    builtin: bool = True  # False for user-added custom Hugging Face repos
+
+
+# Curated registry of WD-style ONNX taggers (all from SmilingWolf on Hugging
+# Face). Every entry exposes ``model.onnx`` + ``selected_tags.csv`` and shares
+# the same BGR / square-pad preprocessing, so they are drop-in interchangeable.
+MODEL_REGISTRY: list[TaggerModelInfo] = [
+    TaggerModelInfo(
+        repo_id="SmilingWolf/wd-swinv2-tagger-v3",
+        name="WD SwinV2 v3",
+        description=(
+            "Balanced accuracy and speed. The proven default for anime/"
+            "illustration tagging and LoRA dataset captioning."
+        ),
+        approx_size_mb=380,
+        recommended=True,
+    ),
+    TaggerModelInfo(
+        repo_id="SmilingWolf/wd-vit-tagger-v3",
+        name="WD ViT v3",
+        description=(
+            "Vision Transformer variant. Slightly faster, comparable quality — "
+            "a good lightweight alternative to SwinV2."
+        ),
+        approx_size_mb=380,
+    ),
+    TaggerModelInfo(
+        repo_id="SmilingWolf/wd-convnext-tagger-v3",
+        name="WD ConvNeXt v3",
+        description=(
+            "ConvNeXt architecture. Different inductive biases than the ViT/Swin "
+            "models — useful for a second opinion on tricky images."
+        ),
+        approx_size_mb=400,
+    ),
+    TaggerModelInfo(
+        repo_id="SmilingWolf/wd-vit-large-tagger-v3",
+        name="WD ViT-Large v3",
+        description=(
+            "Larger ViT with higher tag accuracy at the cost of speed and disk. "
+            "Recommended when quality matters more than throughput."
+        ),
+        approx_size_mb=1200,
+    ),
+    TaggerModelInfo(
+        repo_id="SmilingWolf/wd-eva02-large-tagger-v3",
+        name="WD EVA02-Large v3",
+        description=(
+            "The most accurate model in the family. Largest download and slowest "
+            "inference — best for careful, high-quality single-image tagging."
+        ),
+        approx_size_mb=1300,
+    ),
+]
 
 
 @dataclass(frozen=True)
@@ -37,16 +122,149 @@ def _cache_dir() -> Path:
     return Path.home() / ".img_tagger"
 
 
-def _download_model_file(filename: str) -> Path:
-    cache_root = _cache_dir() / MODEL_REPO.replace("/", "__")
+def _repo_cache_root(repo_id: str) -> Path:
+    return _cache_dir() / repo_id.replace("/", "__")
+
+
+def _download_model_file(
+    filename: str,
+    repo_id: str = DEFAULT_MODEL_REPO,
+    *,
+    local_files_only: bool = False,
+) -> Path:
+    cache_root = _repo_cache_root(repo_id)
     cache_root.mkdir(parents=True, exist_ok=True)
     return Path(
         hf_hub_download(
-            repo_id=MODEL_REPO,
+            repo_id=repo_id,
             filename=filename,
             cache_dir=str(cache_root),
+            local_files_only=local_files_only,
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Config persistence (selected model + user-added custom repos)
+# ---------------------------------------------------------------------------
+
+
+def _config_path() -> Path:
+    return _cache_dir() / "config.json"
+
+
+def _load_config() -> dict:
+    try:
+        return json.loads(_config_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_config(config: dict) -> None:
+    try:
+        _cache_dir().mkdir(parents=True, exist_ok=True)
+        _config_path().write_text(json.dumps(config, indent=2), encoding="utf-8")
+    except Exception as exc:  # pragma: no cover - best-effort persistence
+        warnings.warn(f"Could not persist tagger config: {exc}", RuntimeWarning, stacklevel=2)
+
+
+def get_selected_model() -> str:
+    """Return the repo id of the recognition model the user last selected."""
+    repo = _load_config().get("tagger_model")
+    if isinstance(repo, str) and repo.strip():
+        return repo
+    return DEFAULT_MODEL_REPO
+
+
+def set_selected_model(repo_id: str) -> None:
+    config = _load_config()
+    config["tagger_model"] = repo_id
+    _save_config(config)
+
+
+def _custom_models() -> list[TaggerModelInfo]:
+    infos: list[TaggerModelInfo] = []
+    for repo in _load_config().get("custom_tagger_models", []) or []:
+        if not isinstance(repo, str) or not repo.strip():
+            continue
+        if any(m.repo_id == repo for m in MODEL_REGISTRY):
+            continue
+        infos.append(
+            TaggerModelInfo(
+                repo_id=repo,
+                name=repo.split("/")[-1],
+                description="Custom Hugging Face model added by you.",
+                approx_size_mb=0,
+                builtin=False,
+            )
+        )
+    return infos
+
+
+def _remember_custom_model(repo_id: str) -> None:
+    if any(m.repo_id == repo_id for m in MODEL_REGISTRY):
+        return
+    config = _load_config()
+    existing = list(config.get("custom_tagger_models", []) or [])
+    if repo_id not in existing:
+        existing.append(repo_id)
+        config["custom_tagger_models"] = existing
+        _save_config(config)
+
+
+def _forget_custom_model(repo_id: str) -> None:
+    config = _load_config()
+    existing = list(config.get("custom_tagger_models", []) or [])
+    if repo_id in existing:
+        existing.remove(repo_id)
+        config["custom_tagger_models"] = existing
+        _save_config(config)
+
+
+# ---------------------------------------------------------------------------
+# Model registry / download / delete
+# ---------------------------------------------------------------------------
+
+
+def list_models() -> list[TaggerModelInfo]:
+    """All selectable recognition models: built-in registry + custom repos."""
+    return list(MODEL_REGISTRY) + _custom_models()
+
+
+def find_model(repo_id: str) -> TaggerModelInfo | None:
+    for info in list_models():
+        if info.repo_id == repo_id:
+            return info
+    return None
+
+
+def is_model_downloaded(repo_id: str) -> bool:
+    """True if both the ONNX model and tags file are already in the local cache."""
+    try:
+        _download_model_file(MODEL_FILE, repo_id, local_files_only=True)
+        _download_model_file(TAGS_FILE, repo_id, local_files_only=True)
+        return True
+    except Exception:
+        return False
+
+
+def download_model(repo_id: str) -> None:
+    """Fetch the ONNX model + tags for *repo_id* into the local cache.
+
+    Blocking and potentially slow (hundreds of MB) — call from a worker thread.
+    """
+    _remember_custom_model(repo_id)
+    _download_model_file(MODEL_FILE, repo_id)
+    _download_model_file(TAGS_FILE, repo_id)
+
+
+def delete_model_files(repo_id: str) -> None:
+    """Remove a downloaded model's cached files to reclaim disk space."""
+    cache_root = _repo_cache_root(repo_id)
+    if cache_root.exists():
+        shutil.rmtree(cache_root, ignore_errors=True)
+    _tagger_cache.pop(repo_id, None)
+    _forget_custom_model(repo_id)
 
 
 def _load_tags(csv_path: Path) -> list[TagRecord]:
@@ -105,9 +323,10 @@ def _make_square(image: Image.Image, size: int) -> Image.Image:
 
 
 class AnimeTagger:
-    def __init__(self) -> None:
-        model_path = _download_model_file(MODEL_FILE)
-        tags_path = _download_model_file(TAGS_FILE)
+    def __init__(self, repo_id: str = DEFAULT_MODEL_REPO) -> None:
+        self.repo_id = repo_id
+        model_path = _download_model_file(MODEL_FILE, repo_id)
+        tags_path = _download_model_file(TAGS_FILE, repo_id)
         self.tags = _load_tags(tags_path)
         self.session = self._create_session(model_path)
         self.input_name = self.session.get_inputs()[0].name
@@ -237,9 +456,21 @@ def predict_tags(
     return tagger.predict(image, **kwargs)
 
 
-@lru_cache(maxsize=1)
-def get_tagger() -> AnimeTagger:
-    return AnimeTagger()
+# Only the active model is kept resident — each ONNX session is large (RAM/VRAM),
+# so switching models evicts the previous one rather than accumulating them.
+_tagger_cache: dict[str, AnimeTagger] = {}
+
+
+def get_tagger(repo_id: str | None = None) -> AnimeTagger:
+    """Return the tagger for *repo_id* (defaults to the user's selected model)."""
+    if repo_id is None:
+        repo_id = get_selected_model()
+    tagger = _tagger_cache.get(repo_id)
+    if tagger is None:
+        _tagger_cache.clear()
+        tagger = AnimeTagger(repo_id)
+        _tagger_cache[repo_id] = tagger
+    return tagger
 
 
 def image_from_bytes(data: bytes) -> Image.Image:

@@ -24,6 +24,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from backend.description_tagger import DescriptionTagResult, get_description_tagger
+from backend import tagger as tagger_backend
 from backend.tagger import category_label, get_tagger, predict_tags
 from backend.tag_utils import (
     IMAGE_EXTENSIONS,
@@ -41,7 +42,12 @@ from backend.tag_utils import (
 from frontend.native.completer import CaptionCompleterMixin
 from frontend.native.styles import build_stylesheet
 from frontend.native.widgets import HelpDialog
-from frontend.native.workers import DescriptionTagWorker, ImageLoadWorker, ModelOperationWorker
+from frontend.native.workers import (
+    DescriptionTagWorker,
+    ImageLoadWorker,
+    ModelOperationWorker,
+    TaggerModelWorker,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -51,8 +57,8 @@ from frontend.native.workers import DescriptionTagWorker, ImageLoadWorker, Model
 class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Img-Tagbooru v1.3.3")
-        self.resize(1500, 920)
+        self.setWindowTitle("Img-Tagbooru v1.3.4")
+        self.resize(1500, 960)
         self.setMinimumSize(1200, 720)
         self.setAcceptDrops(True)
 
@@ -240,6 +246,58 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         form = QtWidgets.QFormLayout(settings_group)
         form.setSpacing(8)
 
+        # ── Recognition model (ONNX image tagger) ────────────────────────────
+        # Mirrors the LLM model selector on the Description tab: choose which
+        # vision model recognizes images, and download/update/remove models.
+        # Packed into one tight block so the dense settings panel stays compact.
+        model_hdr = QtWidgets.QLabel("🧠 Recognition Model")
+        model_hdr.setStyleSheet("color: #4da6ff; font-weight: bold; font-size: 11px;")
+
+        self.tagger_model_selector = QtWidgets.QComboBox()
+        self.tagger_model_selector.setToolTip(
+            "The ONNX vision model used to recognize images and produce tags.\n"
+            "Not-downloaded models are fetched on first use."
+        )
+        self.tagger_model_selector.setStyleSheet(
+            "background-color: #1a1a1a; color: #ffffff; padding: 4px;"
+        )
+
+        self.manage_tagger_btn = QtWidgets.QPushButton("⚙️ Manage")
+        self.manage_tagger_btn.setToolTip("Download, update, or remove recognition models")
+        self.manage_tagger_btn.clicked.connect(self._show_tagger_model_manager)
+
+        model_selector_row = QtWidgets.QHBoxLayout()
+        model_selector_row.setContentsMargins(0, 0, 0, 0)
+        model_selector_row.setSpacing(4)
+        model_selector_row.addWidget(self.tagger_model_selector, 1)
+        model_selector_row.addWidget(self.manage_tagger_btn)
+
+        self.tagger_model_desc = QtWidgets.QLabel("")
+        self.tagger_model_desc.setWordWrap(True)
+        self.tagger_model_desc.setStyleSheet("color: #9ecbff; font-size: 10px;")
+
+        model_sep = QtWidgets.QFrame()
+        model_sep.setFrameShape(QtWidgets.QFrame.HLine)
+        model_sep.setFrameShadow(QtWidgets.QFrame.Sunken)
+        model_sep.setStyleSheet("color: #333;")
+
+        model_box = QtWidgets.QWidget()
+        model_box_layout = QtWidgets.QVBoxLayout(model_box)
+        model_box_layout.setContentsMargins(0, 0, 0, 0)
+        model_box_layout.setSpacing(4)
+        model_box_layout.addWidget(model_hdr)
+        model_box_layout.addLayout(model_selector_row)
+        model_box_layout.addWidget(self.tagger_model_desc)
+        model_box_layout.addWidget(model_sep)
+        form.addRow(model_box)
+
+        # Tracks the currently active repo so we can revert the combo if the
+        # user picks a not-downloaded model and then cancels the download.
+        self._active_tagger_repo: str = tagger_backend.get_selected_model()
+        self._tagger_worker: TaggerModelWorker | None = None
+        self.tagger_model_selector.currentIndexChanged.connect(self._on_tagger_model_changed)
+        self._refresh_tagger_models()
+
         self.general_threshold = QtWidgets.QDoubleSpinBox()
         self.general_threshold.setObjectName("generalThreshold")
         self.general_threshold.setRange(0.0, 1.0)
@@ -356,9 +414,18 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         form.addRow(QtWidgets.QLabel("Categories:"), category_widget)
         form.addRow(QtWidgets.QLabel("Blacklist:"), self.blacklist)
         form.addRow(QtWidgets.QLabel("Whitelist:"), self.whitelist)
-        form.addRow(self.normalize_pixels)
-        form.addRow(self.use_mcut)
-        form.addRow(self.include_scores)
+
+        # Processing toggles share one row — the wide panel fits them side by
+        # side, keeping the settings column short.
+        options_widget = QtWidgets.QWidget()
+        options_row = QtWidgets.QHBoxLayout(options_widget)
+        options_row.setContentsMargins(0, 0, 0, 0)
+        options_row.setSpacing(16)
+        options_row.addWidget(self.normalize_pixels)
+        options_row.addWidget(self.use_mcut)
+        options_row.addWidget(self.include_scores)
+        options_row.addStretch(1)
+        form.addRow(QtWidgets.QLabel("Options:"), options_widget)
         right_splitter.addWidget(settings_group)
 
         table_group = QtWidgets.QGroupBox("🏷️ Tags")
@@ -548,6 +615,10 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         right_splitter.setStretchFactor(0, 2)  # settings
         right_splitter.setStretchFactor(1, 4)  # tags table
         right_splitter.setStretchFactor(2, 3)  # caption
+        # Explicit initial heights so the Tags table (primary output) gets a
+        # fair share on launch instead of being squeezed by the tall settings
+        # panel's size hint. Users can still drag the handles to rebalance.
+        right_splitter.setSizes([420, 340, 220])
 
         self.caption_prefix.textChanged.connect(self._update_affix_preview)
         self.caption_postfix.textChanged.connect(self._update_affix_preview)
@@ -935,11 +1006,11 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         QtWidgets.QMessageBox.about(
             self,
             "About Img-Tagbooru",
-            "Img-Tagbooru v1.3.3\n\n"
+            "Img-Tagbooru v1.3.4\n\n"
             "Local Anime Image Tagger\n"
             "WD14-style tagging for anime images and LoRA training.\n\n"
             "Features:\n"
-            "• Local image tagging with WD-SwinV2 ONNX model\n"
+            "• Local image tagging with switchable WD ONNX models\n"
             "• Batch processing with drag & drop\n"
             "• Description-to-tags with local Ollama LLM\n"
             "• Tag enrichment from seed tags\n"
@@ -2564,6 +2635,348 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
     # Model management dialog (pull / list / delete)
     # ==================================================================
 
+    # ==================================================================
+    # Recognition (ONNX) model management — Batch Tagger
+    # ==================================================================
+
+    def _refresh_tagger_models(self) -> None:
+        """Repopulate the recognition-model dropdown from the backend registry."""
+        self.tagger_model_selector.blockSignals(True)
+        self.tagger_model_selector.clear()
+        active_idx = 0
+        for idx, info in enumerate(tagger_backend.list_models()):
+            downloaded = tagger_backend.is_model_downloaded(info.repo_id)
+            star = "⭐ " if info.recommended else ""
+            if downloaded:
+                status = "✓ installed"
+            elif info.approx_size_mb:
+                status = f"⬇ ~{info.approx_size_mb} MB"
+            else:
+                status = "⬇ not installed"
+            self.tagger_model_selector.addItem(f"{star}{info.name} — {status}", info.repo_id)
+            if info.repo_id == self._active_tagger_repo:
+                active_idx = idx
+        self.tagger_model_selector.setCurrentIndex(active_idx)
+        self.tagger_model_selector.blockSignals(False)
+        self._update_tagger_model_desc(self._active_tagger_repo)
+
+    def _update_tagger_model_desc(self, repo_id: str) -> None:
+        info = tagger_backend.find_model(repo_id)
+        if info is None:
+            self.tagger_model_desc.setText(repo_id)
+            return
+        # Keep this to a single line — the dropdown already shows install state.
+        self.tagger_model_desc.setText(f"<b>{info.name}</b> — {info.description}")
+
+    def _sync_combo_to_active(self) -> None:
+        """Reset the dropdown to the active model (e.g. after a cancelled switch)."""
+        self.tagger_model_selector.blockSignals(True)
+        idx = self.tagger_model_selector.findData(self._active_tagger_repo)
+        if idx >= 0:
+            self.tagger_model_selector.setCurrentIndex(idx)
+        self.tagger_model_selector.blockSignals(False)
+        self._update_tagger_model_desc(self._active_tagger_repo)
+
+    def _set_active_tagger_model(self, repo_id: str) -> None:
+        tagger_backend.set_selected_model(repo_id)
+        self._active_tagger_repo = repo_id
+        self._refresh_tagger_models()
+        info = tagger_backend.find_model(repo_id)
+        self.statusbar.showMessage(
+            f"Recognition model set to {info.name if info else repo_id}.", 5000
+        )
+
+    def _on_tagger_model_changed(self, _index: int) -> None:
+        repo_id = self.tagger_model_selector.currentData()
+        if not repo_id:
+            return
+        if repo_id == self._active_tagger_repo:
+            self._update_tagger_model_desc(repo_id)
+            return
+        if tagger_backend.is_model_downloaded(repo_id):
+            self._set_active_tagger_model(repo_id)
+            return
+        # Not downloaded — offer to fetch it now.
+        info = tagger_backend.find_model(repo_id)
+        name = info.name if info else repo_id
+        size = f" (~{info.approx_size_mb} MB)" if info and info.approx_size_mb else ""
+        reply = QtWidgets.QMessageBox.question(
+            self,
+            "Download Recognition Model",
+            f"'{name}' is not downloaded yet{size}.\n\n"
+            "Download it now and set it as the active model?",
+            QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+            QtWidgets.QMessageBox.Yes,
+        )
+        if reply != QtWidgets.QMessageBox.Yes:
+            self._sync_combo_to_active()
+            return
+        self._start_tagger_download(repo_id, activate=True)
+
+    def _start_tagger_download(self, repo_id: str, activate: bool = True, done_cb=None) -> None:
+        """Download a model in the background, showing a modal busy dialog."""
+        if self._tagger_worker is not None and self._tagger_worker.isRunning():
+            QtWidgets.QMessageBox.information(
+                self, "Please Wait", "Another model operation is already in progress."
+            )
+            return
+
+        info = tagger_backend.find_model(repo_id)
+        name = info.name if info else repo_id
+
+        busy = QtWidgets.QDialog(self)
+        busy.setWindowTitle("Downloading Model")
+        busy.setModal(True)
+        busy.setStyleSheet(self.styleSheet())
+        busy.setFixedWidth(440)
+        busy.setWindowFlag(QtCore.Qt.WindowCloseButtonHint, False)
+        v = QtWidgets.QVBoxLayout(busy)
+        v.setSpacing(10)
+        label = QtWidgets.QLabel(
+            f"⬇ Downloading <b>{name}</b>…<br>"
+            "First download can take several minutes depending on model size."
+        )
+        label.setWordWrap(True)
+        v.addWidget(label)
+        bar = QtWidgets.QProgressBar()
+        bar.setRange(0, 0)  # indeterminate
+        bar.setTextVisible(False)
+        bar.setFixedHeight(8)
+        v.addWidget(bar)
+        hide_btn = QtWidgets.QPushButton("Hide (keeps downloading)")
+        hide_btn.clicked.connect(busy.accept)
+        v.addWidget(hide_btn)
+
+        def _finished(success: bool, message: str, done_repo: str) -> None:
+            busy.accept()
+            self._tagger_worker = None
+            if success:
+                if activate:
+                    self._set_active_tagger_model(done_repo)
+                else:
+                    self._refresh_tagger_models()
+                self.statusbar.showMessage(f"{name}: {message}", 6000)
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self, "Download Failed", f"Could not download {name}:\n\n{message}"
+                )
+                self._sync_combo_to_active()
+            if done_cb is not None:
+                done_cb(success)
+
+        self._tagger_worker = TaggerModelWorker("download", repo_id)
+        self._tagger_worker.finished.connect(_finished)
+        self._tagger_worker.finished.connect(self._tagger_worker.quit)
+        self.statusbar.showMessage(f"Downloading {name}…")
+        self._tagger_worker.start()
+        busy.exec()
+
+    def _show_tagger_model_manager(self) -> None:
+        """Dialog to download / update / activate / delete recognition models."""
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("⚙️ Recognition Model Manager")
+        dlg.resize(660, 540)
+        dlg.setModal(True)
+        dlg.setStyleSheet(self.styleSheet())
+        layout = QtWidgets.QVBoxLayout(dlg)
+        layout.setSpacing(10)
+
+        intro = QtWidgets.QLabel(
+            "Choose which ONNX vision model recognizes your images. Download new "
+            "models, update to the latest weights, set the active model, or delete "
+            "ones you no longer use to reclaim disk space."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #9ecbff; font-size: 11px;")
+        layout.addWidget(intro)
+
+        list_group = QtWidgets.QGroupBox("📦 Available Models")
+        list_layout = QtWidgets.QVBoxLayout(list_group)
+
+        model_list = QtWidgets.QListWidget()
+        model_list.setStyleSheet(
+            "background-color: #0d0d0d; color: #e0e0e0; border: 1px solid #444; "
+            "border-radius: 5px; padding: 5px;"
+        )
+        list_layout.addWidget(model_list, 1)
+
+        desc_label = QtWidgets.QLabel("")
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #9ecbff; font-size: 10px; padding: 2px;")
+        list_layout.addWidget(desc_label)
+
+        status_label = QtWidgets.QLabel("")
+        status_label.setStyleSheet("color: #9ecbff; font-size: 10px;")
+        list_layout.addWidget(status_label)
+
+        def _refresh_list() -> None:
+            model_list.blockSignals(True)
+            model_list.clear()
+            for info in tagger_backend.list_models():
+                downloaded = tagger_backend.is_model_downloaded(info.repo_id)
+                active = info.repo_id == self._active_tagger_repo
+                marks: list[str] = []
+                if active:
+                    marks.append("● active")
+                if downloaded:
+                    marks.append("✓ installed")
+                elif info.approx_size_mb:
+                    marks.append(f"~{info.approx_size_mb} MB")
+                else:
+                    marks.append("not installed")
+                if info.recommended:
+                    marks.append("recommended")
+                if not info.builtin:
+                    marks.append("custom")
+                item = QtWidgets.QListWidgetItem(f"{info.name}   [{' · '.join(marks)}]")
+                item.setData(QtCore.Qt.UserRole, info.repo_id)
+                item.setToolTip(f"{info.repo_id}\n\n{info.description}")
+                model_list.addItem(item)
+            model_list.blockSignals(False)
+            # Keep the main-window dropdown in sync with any changes made here.
+            self._refresh_tagger_models()
+            _on_row_changed()
+
+        def _on_row_changed() -> None:
+            item = model_list.currentItem()
+            if item is None:
+                desc_label.setText("Select a model to see details.")
+                dl_btn.setEnabled(False)
+                set_active_btn.setEnabled(False)
+                delete_btn.setEnabled(False)
+                return
+            repo = item.data(QtCore.Qt.UserRole)
+            info = tagger_backend.find_model(repo)
+            downloaded = tagger_backend.is_model_downloaded(repo)
+            is_active = repo == self._active_tagger_repo
+            dl_btn.setEnabled(True)
+            dl_btn.setText("🔁 Update" if downloaded else "⬇ Download")
+            set_active_btn.setEnabled(downloaded and not is_active)
+            # Can remove a downloaded model or a custom entry, but not the active one.
+            removable = (downloaded or (info is not None and not info.builtin)) and not is_active
+            delete_btn.setEnabled(removable)
+            if info is not None:
+                state = "installed" if downloaded else "not installed"
+                desc_label.setText(f"<b>{info.repo_id}</b><br>{info.description} <i>({state})</i>")
+            else:
+                desc_label.setText(repo)
+
+        model_list.currentRowChanged.connect(lambda _row: _on_row_changed())
+
+        # --- Action buttons ---
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(4)
+
+        dl_btn = QtWidgets.QPushButton("⬇ Download")
+        dl_btn.setToolTip("Download the selected model, or update it to the latest weights")
+
+        def _on_download() -> None:
+            item = model_list.currentItem()
+            if item is None:
+                return
+            repo = item.data(QtCore.Qt.UserRole)
+            self._start_tagger_download(repo, activate=False, done_cb=lambda ok: _refresh_list())
+
+        dl_btn.clicked.connect(_on_download)
+        btn_row.addWidget(dl_btn)
+
+        set_active_btn = QtWidgets.QPushButton("✅ Set Active")
+        set_active_btn.setToolTip("Use the selected model for image tagging")
+
+        def _on_set_active() -> None:
+            item = model_list.currentItem()
+            if item is None:
+                return
+            repo = item.data(QtCore.Qt.UserRole)
+            self._set_active_tagger_model(repo)
+            status_label.setText(f"Active model: {repo}")
+            _refresh_list()
+
+        set_active_btn.clicked.connect(_on_set_active)
+        btn_row.addWidget(set_active_btn)
+
+        delete_btn = QtWidgets.QPushButton("🗑 Delete")
+        delete_btn.setStyleSheet(
+            "QPushButton { background-color: #5c1a1a; color: #ffaaaa; "
+            "border: 1px solid #9a3a3a; }"
+            "QPushButton:hover { background-color: #702828; border: 1px solid #cc4444; }"
+        )
+        delete_btn.setToolTip("Remove the selected model's downloaded files")
+
+        def _on_delete() -> None:
+            item = model_list.currentItem()
+            if item is None:
+                return
+            repo = item.data(QtCore.Qt.UserRole)
+            info = tagger_backend.find_model(repo)
+            name = info.name if info else repo
+            reply = QtWidgets.QMessageBox.question(
+                dlg,
+                "Confirm Delete",
+                f"Delete downloaded files for '{name}'?\n\n"
+                "This frees disk space. You can download it again later.",
+                QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No,
+                QtWidgets.QMessageBox.No,
+            )
+            if reply != QtWidgets.QMessageBox.Yes:
+                return
+            QtWidgets.QApplication.setOverrideCursor(QtCore.Qt.WaitCursor)
+            try:
+                tagger_backend.delete_model_files(repo)
+            except Exception as e:  # pragma: no cover - defensive
+                QtWidgets.QMessageBox.warning(dlg, "Delete Failed", str(e))
+            finally:
+                QtWidgets.QApplication.restoreOverrideCursor()
+            status_label.setText(f"Deleted {name}.")
+            _refresh_list()
+
+        delete_btn.clicked.connect(_on_delete)
+        btn_row.addWidget(delete_btn)
+        btn_row.addStretch(1)
+        list_layout.addLayout(btn_row)
+        layout.addWidget(list_group, 1)
+
+        # --- Custom Hugging Face repo ---
+        custom_group = QtWidgets.QGroupBox("➕ Add Custom Model (Advanced)")
+        custom_layout = QtWidgets.QHBoxLayout(custom_group)
+        custom_input = QtWidgets.QLineEdit()
+        custom_input.setPlaceholderText("Hugging Face repo, e.g. SmilingWolf/wd-vit-large-tagger-v3")
+        custom_input.setStyleSheet(
+            "background-color: #0d0d0d; color: #ffffff; padding: 6px; "
+            "border: 1px solid #444; border-radius: 4px;"
+        )
+        custom_layout.addWidget(custom_input, 1)
+
+        def _on_add_custom() -> None:
+            repo = custom_input.text().strip()
+            if not repo:
+                return
+            if "/" not in repo:
+                QtWidgets.QMessageBox.warning(
+                    dlg,
+                    "Invalid Repo",
+                    "Enter a full Hugging Face repo id in the form 'owner/model'.\n"
+                    "The repo must contain 'model.onnx' and 'selected_tags.csv'.",
+                )
+                return
+            custom_input.clear()
+            self._start_tagger_download(repo, activate=False, done_cb=lambda ok: _refresh_list())
+
+        add_custom_btn = QtWidgets.QPushButton("⬇ Download")
+        add_custom_btn.clicked.connect(_on_add_custom)
+        custom_layout.addWidget(add_custom_btn)
+        layout.addWidget(custom_group)
+
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        layout.addWidget(close_btn)
+
+        _refresh_list()
+        if model_list.count():
+            model_list.setCurrentRow(0)
+        _on_row_changed()
+        dlg.exec()
+
     def _show_model_manager(self) -> None:
         """Open a dialog to pull, list or delete Ollama models."""
 
@@ -2718,10 +3131,23 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
     # ==================================================================
 
 def main() -> None:
+    # Windowed builds (pythonw / PyInstaller --windowed) run without a console,
+    # so sys.stdout/sys.stderr are None. Libraries that write to them (tqdm,
+    # logging, print) would crash — route None streams to a null sink.
+    import os
+    for _stream_name in ("stdout", "stderr"):
+        if getattr(sys, _stream_name, None) is None:
+            try:
+                setattr(sys, _stream_name, open(os.devnull, "w", encoding="utf-8"))
+            except Exception:
+                pass
+
     # Suppress the HuggingFace unauthenticated-request warning — it's noise
     # for end users who don't have an HF_TOKEN set.
-    import os
     os.environ.setdefault("HF_HUB_DISABLE_IMPLICIT_TOKEN", "1")
+    # Belt-and-suspenders: also disable HF progress bars via env for any
+    # subprocess / re-import path that runs before backend.tagger is imported.
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
     import warnings
     warnings.filterwarnings(
         "ignore",
@@ -2732,7 +3158,7 @@ def main() -> None:
     app = QtWidgets.QApplication([])
     app.setApplicationName("Img-Tagbooru")
     app.setApplicationDisplayName("Img-Tagbooru")
-    app.setApplicationVersion("1.3.3")
+    app.setApplicationVersion("1.3.4")
 
     window = MainWindow()
     window.show()
