@@ -35,6 +35,41 @@ class ModelOperationWorker(QtCore.QThread):
             self.finished.emit(False, str(e))
 
 
+class TaggerModelWorker(QtCore.QThread):
+    """Download (and warm) or delete an ONNX recognition model off the UI thread.
+
+    Downloads are hundreds of megabytes, so they must never run on the Qt event
+    loop. On a successful download the model session is also built and cached so
+    the first image tag after switching is instant instead of stalling the UI.
+    """
+
+    finished = QtCore.Signal(bool, str, str)
+    """Emitted with (success, message, repo_id) when the operation completes."""
+
+    def __init__(self, operation: str, repo_id: str) -> None:
+        super().__init__()
+        self._operation = operation  # "download" or "delete"
+        self._repo_id = repo_id
+
+    def run(self) -> None:
+        from backend import tagger as tagger_backend
+
+        try:
+            if self._operation == "download":
+                tagger_backend.download_model(self._repo_id)
+                # Build the ONNX session now so switching to it is instant and
+                # any load error surfaces here instead of at first tag.
+                tagger_backend.get_tagger(self._repo_id)
+                self.finished.emit(True, "Model downloaded and ready to use.", self._repo_id)
+            elif self._operation == "delete":
+                tagger_backend.delete_model_files(self._repo_id)
+                self.finished.emit(True, "Model deleted.", self._repo_id)
+            else:
+                self.finished.emit(False, f"Unknown operation: {self._operation}", self._repo_id)
+        except Exception as e:
+            self.finished.emit(False, str(e), self._repo_id)
+
+
 class DescriptionTagWorker(QtCore.QThread):
     finished = QtCore.Signal(DescriptionTagResult)
     error = QtCore.Signal(str)

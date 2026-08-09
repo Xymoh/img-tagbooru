@@ -2,6 +2,25 @@
 
 All notable changes to Img-Tagbooru are documented in this file.
 
+## [v1.3.4] - 2026-08-09
+
+### Added
+
+#### Recognition Model Management (ONNX image tagger)
+- **Switchable recognition models** — the image-recognition (ONNX) model is now selectable in-app instead of hardcoded to WD SwinV2 v3. A new **🧠 Recognition Model** dropdown at the top of the Batch Tagger's *Tagging Settings* lets you choose the active model, with a description and download state (`✓ installed` / `~size MB`) per entry.
+- **Download / update / delete / choose** — a **⚙️ Manage** dialog downloads new models, updates installed ones to the latest weights, sets the active model, or deletes downloaded files to reclaim disk space. Downloads run on a background `TaggerModelWorker` thread with a busy indicator, keeping the UI responsive.
+- **Curated model registry** — WD SwinV2 v3 (default ⭐), WD ViT v3, WD ConvNeXt v3, WD ViT-Large v3, and WD EVA02-Large v3, all drop-in interchangeable (shared BGR/square-pad preprocessing).
+- **Custom models (advanced)** — add any Hugging Face repo that ships `model.onnx` + `selected_tags.csv`.
+- **Persistent selection** — the chosen model (and any custom repos) are remembered in `~/.img_tagger/config.json`; models are cached under `~/.img_tagger`.
+- `backend/tagger.py` refactored: `TaggerModelInfo` registry, per-repo download/cache helpers (`list_models`, `is_model_downloaded`, `download_model`, `delete_model_files`), and `get_tagger(repo_id)` keyed by model (only the active model stays resident to bound RAM/VRAM).
+
+### Fixed
+- **Model download crash in windowed builds** — `pythonw` / PyInstaller `--windowed` runs without a console, so `sys.stderr` is `None`; huggingface_hub's tqdm download progress bar wrote to it and crashed the download with `'NoneType' object has no attribute 'write'`. huggingface_hub progress bars are now disabled at import (we render our own progress UI), and `main()` routes any `None` stdout/stderr to a null sink as a general safeguard for logging/print.
+
+### Changed
+- **Batch Tagger layout compaction for 1920×1080** — the Recognition Model block is grouped into one tight section; the three processing toggles (*Normalize pixels*, *Use MCut*, *Show scores*) share a single **Options:** row; the default window is `1500×960` and the right-hand splitter uses explicit initial sizes so the Tags table gets a fair share on launch instead of being squeezed.
+- README, Help dialog, and About dialog updated to describe switchable recognition models.
+
 ## [v1.3.3] - 2026-05-17
 
 #### Support KoFi

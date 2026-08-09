@@ -66,7 +66,7 @@ class HelpDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("📖 User Guide - Img-Tagboru")
+        self.setWindowTitle("📖 User Guide - Img-Tagbooru")
         self.resize(700, 600)
         self.setStyleSheet("""
             QDialog {
@@ -88,7 +88,7 @@ class HelpDialog(QtWidgets.QDialog):
         layout = QtWidgets.QVBoxLayout(self)
 
         # Title
-        title = QtWidgets.QLabel("🏷️ Img-Tagboru - User Guide")
+        title = QtWidgets.QLabel("🏷️ Img-Tagbooru - User Guide")
         title.setStyleSheet("font-size: 18px; font-weight: bold; color: #4da6ff; margin-bottom: 10px;")
         layout.addWidget(title)
 
@@ -108,6 +108,9 @@ class HelpDialog(QtWidgets.QDialog):
 
         <h3 style="color: #66ff66;">⚙️ Tagging Settings</h3>
         <ul>
+            <li><b>🧠 Recognition Model:</b> Choose which ONNX vision model tags your images.
+                Use <b>⚙️ Manage</b> to download, update, or delete models (WD SwinV2, ViT,
+                ConvNeXt, ViT-Large, EVA02-Large, or a custom Hugging Face repo). Your choice is remembered.</li>
             <li><b>General Threshold (0.25-0.40):</b> Lower = more tags, may include false positives</li>
             <li><b>Character Threshold (0.80-0.95):</b> Higher = only confident character matches</li>
             <li><b>Max Tags:</b> Limit tags per image (40-80 is typical for training)</li>
@@ -325,7 +328,7 @@ class HelpDialog(QtWidgets.QDialog):
         <hr style="border: 1px solid #444;">
         <p style="color: #9ecbff; font-size: 11px;">
             Need help? Check the
-            <a href="https://github.com/Xymoh/img-tagboru-ai" style="color: #4da6ff;">GitHub repository</a>
+            <a href="https://github.com/Xymoh/img-tagbooru" style="color: #4da6ff;">GitHub repository</a>
             or review the README.md file.
         </p>
         """)
