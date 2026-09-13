@@ -143,6 +143,83 @@ class HelpDialog(QtWidgets.QDialog):
             <li><b>Re-run for variety:</b> The AI uses temperature sampling — running the same prompt again can produce different (sometimes better) results</li>
         </ul>
 
+        <h3 style="color: #66ff66;">🏷️ Output Format: Tags or Natural Language</h3>
+        <p>The <b>Output format</b> dropdown picks what the Description Tagger produces. It is
+        independent of the input mode, so all four combinations work.</p>
+        <ul>
+            <li><b>🏷️ Danbooru Tags</b> — comma-separated tags for SDXL-anime models
+                (Illustrious, NoobAI, Pony) in ComfyUI or A1111.</li>
+            <li><b>📝 Natural Language</b> — a flowing prose paragraph for models that read plain
+                English, such as Krea and Flux. No underscores, no <code>(weight:1.3)</code> syntax,
+                and no <i>masterpiece, best quality</i> spam — those are booru-model habits that do
+                nothing on these encoders.</li>
+        </ul>
+        <p><b>Natural Language runs in two stages:</b> a Danbooru tag set is generated first, then
+        rewritten as prose. That means the prompt inherits everything the tag pipeline adds —
+        concept expansion, backfill, dedup and conflict resolution — so "a girl, emo, black hair"
+        becomes a paragraph naming the studded belt and chipped nail polish you never typed.
+        It takes roughly twice as long as tag output, and the status bar shows which stage is
+        running. A second button copies the source tags, so one run gives you both.</p>
+
+        <h3 style="color: #66ff66;">📝 Write Prompt from Image (photos)</h3>
+        <p>The ONNX taggers are trained on <b>Danbooru</b> — anime and illustration. On a
+        <b>photograph</b> they degrade badly: expect a painting/medium mislabel, mutually exclusive
+        garment guesses, and occasionally an anime character projected onto a real person. That is
+        not a threshold you can tune; photos are simply out of domain.</p>
+        <p>For photos, use <b>📝 Write Prompt from Image</b> in the caption toolbar. A local vision
+        model describes the picture directly in natural language — one step, no tags in between —
+        so it can report lighting, camera framing, depth of field and the character of the room,
+        none of which exist in the booru tag vocabulary.</p>
+        <ul>
+            <li><b>Setup:</b> requires a vision model pulled through Ollama. The dialog lists the
+                JoyCaption quants and shows which are installed. Note that repo has no
+                <code>latest</code> tag, so the quant must be named explicitly:<br>
+                <code>ollama pull aha2025/llama-joycaption-beta-one-hf-llava:Q8_0</code></li>
+            <li><b>No tagging pass needed</b> — load images and caption them straight away.</li>
+            <li><b>Caption styles:</b> the descriptive styles produce flowing prose, which is what
+                Krea/Flux condition on. "Stable Diffusion prompt" returns comma-separated fragments
+                instead.</li>
+            <li><b>Speed:</b> the first run loads several GB into VRAM and can take a minute;
+                after that each image takes a few seconds.</li>
+            <li><b>Saving:</b> prompt files are written as <code>&lt;name&gt;_prompt.txt</code> so
+                they never overwrite the <code>&lt;name&gt;.txt</code> tag captions used for LoRA
+                training.</li>
+        </ul>
+        <p><b>Explicit content:</b> the vision model is uncensored, but a <i>formal</i> register
+        still euphemises — suggestive imagery comes back as "modest cleavage". Tick
+        <b>🔞 Explicit</b> to switch to a casual tone and have it describe anatomy and state of
+        dress directly. The separate <b>Vulgar slang</b> option adds profanity, but trades
+        descriptive detail for slang and is usually counterproductive for prompting — it is meant
+        for captioning training sets.</p>
+
+        <p><b>🎬 Wan 2.2 video prompts:</b> the <b>Output</b> dropdown can also turn the still into
+        an image-to-video prompt — either a second-by-second timeline
+        (<code>(At 0 seconds: ...) (At 1 seconds: ...)</code>, 2-12 seconds) or a flowing
+        paragraph. This runs <i>two</i> models: the vision model describes the first frame, then the
+        text model invents the motion. Asking the vision model to plan motion on its own does not
+        work — it is a captioner, so it just restates the still. Expect a VRAM swap on the first
+        image, and pick the stage-2 text model in the dialog. Saved as
+        <code>&lt;name&gt;_video.txt</code>.</p>
+
+        <p><b>🔊 MMAudio prompts:</b> in video modes, <b>Also write an MMAudio prompt</b> (on by
+        default) writes the soundtrack for the same clip — a positive soundscape plus a negative
+        prompt for exclusions — shown below the video prompt. <b>🔊 Copy Audio</b> copies the
+        positive; Shift-click copies the negative. It reuses the text model already loaded for the
+        motion stage, so it costs seconds and no extra VRAM swap. Batch saves write it to
+        <code>&lt;name&gt;_audio.txt</code>.</p>
+
+        <p><b>✍️ Narration hint:</b> the free-text field steers how the description is worded
+        (<i>"cinematic film-noir tone"</i>, <i>"clinical and factual"</i>). It has a much stronger
+        effect on <b>video</b> prompts than on image captions — the motion stage runs a general
+        instruction-following model, while the captioner is fine-tuned on fixed templates, so free
+        text nudges it rather than transforming it. For caption style, the built-in styles and
+        option checkboxes are the effective lever. Keep hints light when the output goes straight
+        into generation: heavy stylistic wording buys atmosphere at the cost of the concrete motion
+        a video model needs.</p>
+
+        <p>The ONNX taggers remain the right tool for anime/illustration LoRA captioning — this is
+        an additional path, not a replacement.</p>
+
         <h3 style="color: #ff9933;">✍️ Writing Better Descriptions</h3>
         <p>The more concrete visual detail you provide, the better the tags. The AI maps descriptions to tags across these dimensions:</p>
         <table style="width:100%; border-collapse: collapse; margin: 8px 0; font-size: 12px;">
@@ -328,7 +405,7 @@ class HelpDialog(QtWidgets.QDialog):
         <hr style="border: 1px solid #444;">
         <p style="color: #9ecbff; font-size: 11px;">
             Need help? Check the
-            <a href="https://github.com/Xymoh/img-tagbooru" style="color: #4da6ff;">GitHub repository</a>
+            <a href="https://github.com/Xymoh/img-tagboru-ai" style="color: #4da6ff;">GitHub repository</a>
             or review the README.md file.
         </p>
         """)
@@ -351,3 +428,160 @@ class HelpDialog(QtWidgets.QDialog):
         """)
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
+
+
+# ---------------------------------------------------------------------------
+# Bundled text documents (TERMS.md, THIRD_PARTY_NOTICES.txt, LICENSE)
+# ---------------------------------------------------------------------------
+
+def find_bundled_file(filename: str):
+    """Locate a project-root data file in dev and PyInstaller builds."""
+    import sys
+    from pathlib import Path
+
+    base = getattr(sys, "_MEIPASS", None)
+    candidates = []
+    if base:
+        candidates.append(Path(base) / filename)
+    candidates.append(Path(__file__).resolve().parents[2] / filename)
+    candidates.append(Path.cwd() / filename)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def read_bundled_text(filename: str, fallback: str = "") -> str:
+    path = find_bundled_file(filename)
+    if path is None:
+        return fallback
+    try:
+        return path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return fallback
+
+
+# Version of TERMS.md the user must have accepted. Bump this whenever the
+# terms change materially so the dialog is shown again on next launch.
+TERMS_VERSION = "2026-09-13"
+
+_TERMS_FALLBACK = (
+    "# Img-Tagbooru — Terms of Use\n\n"
+    "The bundled TERMS.md could not be found. The current terms are published at\n"
+    "https://github.com/Xymoh/img-tagboru-ai/blob/main/TERMS.md\n\n"
+    "In short: you must be 18 or older; the software is provided as is under the "
+    "MIT License; you are responsible for the models you install and for complying "
+    "with the law where you live; sexual content involving minors and non-consensual "
+    "intimate content of real people are prohibited."
+)
+
+
+class TextViewerDialog(QtWidgets.QDialog):
+    """Read-only viewer for a bundled document (Markdown or plain text)."""
+
+    def __init__(self, title: str, text: str, parent=None, markdown: bool = True):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(760, 640)
+        self.setStyleSheet("""
+            QDialog { background-color: #1a1a1a; color: #ffffff; }
+            QTextBrowser {
+                background-color: #0d0d0d; color: #e0e0e0;
+                border: 1px solid #333; padding: 10px; font-size: 12px;
+            }
+            QPushButton {
+                background-color: #2b2b2b; color: #e0e0e0; border: 1px solid #444;
+                border-radius: 3px; padding: 6px 14px;
+            }
+            QPushButton:hover { background-color: #3b3b3b; border: 1px solid #4da6ff; }
+        """)
+        layout = QtWidgets.QVBoxLayout(self)
+        browser = QtWidgets.QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        if markdown:
+            browser.setMarkdown(text)
+        else:
+            browser.setPlainText(text)
+        layout.addWidget(browser)
+        close_btn = QtWidgets.QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn, alignment=QtCore.Qt.AlignRight)
+
+
+class TermsDialog(QtWidgets.QDialog):
+    """First-run gate: age confirmation and acceptance of TERMS.md.
+
+    Shown before the main window is built, and again whenever TERMS_VERSION
+    changes. Declining exits the application.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Img-Tagbooru — Terms of Use")
+        self.setModal(True)
+        self.resize(760, 680)
+        self.setStyleSheet("""
+            QDialog { background-color: #1a1a1a; color: #ffffff; }
+            QLabel { color: #ffffff; }
+            QCheckBox { color: #ffffff; font-size: 12px; spacing: 8px; }
+            QCheckBox::indicator { width: 16px; height: 16px; }
+            QTextBrowser {
+                background-color: #0d0d0d; color: #e0e0e0;
+                border: 1px solid #333; padding: 10px; font-size: 12px;
+            }
+            QPushButton {
+                background-color: #2b2b2b; color: #e0e0e0; border: 1px solid #444;
+                border-radius: 3px; padding: 6px 16px; font-size: 12px;
+            }
+            QPushButton:hover { background-color: #3b3b3b; border: 1px solid #4da6ff; }
+            QPushButton#accept { background-color: #0059b3; color: white; font-weight: bold; }
+            QPushButton#accept:hover { background-color: #0073e6; }
+            QPushButton#accept:disabled { background-color: #333; color: #777; }
+        """)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        intro = QtWidgets.QLabel(
+            "<b>Before you start</b><br>"
+            "Img-Tagbooru is free, open-source software that runs entirely on your "
+            "computer. It can produce adult text output when you enable those modes, "
+            "so it is for adults only. Please read the terms below."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        browser = QtWidgets.QTextBrowser()
+        browser.setOpenExternalLinks(True)
+        browser.setMarkdown(read_bundled_text("TERMS.md", _TERMS_FALLBACK))
+        layout.addWidget(browser, stretch=1)
+
+        self.age_check = QtWidgets.QCheckBox("I confirm that I am at least 18 years old.")
+        self.terms_check = QtWidgets.QCheckBox(
+            "I have read and accept the Terms of Use, Acceptable Use and Privacy Notice."
+        )
+        layout.addWidget(self.age_check)
+        layout.addWidget(self.terms_check)
+
+        buttons = QtWidgets.QHBoxLayout()
+        buttons.addStretch(1)
+        decline_btn = QtWidgets.QPushButton("Decline and exit")
+        decline_btn.clicked.connect(self.reject)
+        self.accept_btn = QtWidgets.QPushButton("Accept and continue")
+        self.accept_btn.setObjectName("accept")
+        self.accept_btn.setEnabled(False)
+        self.accept_btn.clicked.connect(self.accept)
+        buttons.addWidget(decline_btn)
+        buttons.addWidget(self.accept_btn)
+        layout.addLayout(buttons)
+
+        self.age_check.toggled.connect(self._update_accept)
+        self.terms_check.toggled.connect(self._update_accept)
+
+    def _update_accept(self) -> None:
+        self.accept_btn.setEnabled(
+            self.age_check.isChecked() and self.terms_check.isChecked()
+        )
+
+    def reject(self) -> None:  # Escape / window close count as declining
+        super().reject()

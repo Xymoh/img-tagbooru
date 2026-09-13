@@ -18,6 +18,7 @@ except ImportError:
     ollama = None
 
 from backend.tag_index import TagFrequencyIndex, get_tag_index
+from backend.content_policy import ADULTS_ONLY_RULE, strip_minor_terms
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -494,6 +495,113 @@ class DescriptionTagResult:
 
 
 # ---------------------------------------------------------------------------
+# Natural-language prompt few-shot examples
+#   Danbooru tag list -> flowing prose prompt.
+#   These teach FORMAT (one paragraph, no tags, no underscores); the per-mode
+#   rules in _build_prose_system_prompt decide how much content latitude the
+#   model has.
+# ---------------------------------------------------------------------------
+
+_PROSE_FEWSHOT: dict[str, list[tuple[str, str]]] = {
+    "safe": [
+        (
+            "1girl, solo, long_hair, silver_hair, ponytail, red_eyes, serious, full_body, standing, "
+            "holding_sword, sword, armor, breastplate, gauntlets, cape, red_cape, brown_boots, belt, "
+            "scabbard, forest, outdoors, tree, grass, dappled_sunlight, wind, hair_blowing, depth_of_field",
+            "A young woman stands alone in a sunlit forest clearing, gripping a longsword point-down in "
+            "the grass. Her silver hair is tied back in a high ponytail that lifts in the wind, and her "
+            "red eyes are set in a serious, level stare. She wears a fitted steel breastplate over "
+            "leather, articulated gauntlets, a heavy belt with an empty scabbard at her hip, and a deep "
+            "red cape that falls behind her to worn brown boots. Dappled afternoon light filters through "
+            "the canopy and scatters across the grass. Full-body shot at eye level, shallow depth of "
+            "field, the trees softening into bokeh behind her.",
+        ),
+        (
+            "2girls, multiple_girls, school_uniform, serafuku, pleated_skirt, blue_skirt, white_shirt, "
+            "sitting, table, cup, coffee, indoors, cafe, window, smile, looking_at_another, brown_hair, "
+            "ponytail, black_hair, short_hair, sunlight",
+            "Two schoolgirls sit across from each other at a small cafe table by a tall window, talking "
+            "over coffee. One has brown hair pulled into a ponytail, the other a short black bob; both "
+            "wear navy sailor uniforms with white blouses and pleated blue skirts. They are turned "
+            "toward one another mid-conversation, one smiling as she wraps both hands around her cup. "
+            "Warm late-afternoon sunlight comes through the window and washes across the tabletop, "
+            "catching the steam. Medium shot from across the table, soft natural light, quiet and "
+            "unhurried mood.",
+        ),
+    ],
+    "creative": [
+        (
+            "1girl, solo, long_hair, black_hair, twintails, hair_over_one_eye, pale_skin, eyeliner, "
+            "choker, black_choker, black_shirt, long_sleeves, black_skirt, pleated_skirt, black_boots, "
+            "knee_boots, arm_warmers, studded_belt, nail_polish, red_background, simple_background, "
+            "looking_at_viewer, standing, depth_of_field",
+            "A pale young woman with long black hair in uneven twintails stands facing the camera, one "
+            "eye hidden behind a heavy sweep of fringe. Sharp black eyeliner rims her eyes and her "
+            "expression is flat and unimpressed. She wears a fitted black long-sleeved shirt, a pleated "
+            "black miniskirt over a studded belt slung low on her hips, black fingerless arm warmers, "
+            "and scuffed black knee-high boots; a plain black choker sits at her throat and her nails "
+            "are painted chipped black. She is lit from the front against a flat crimson backdrop that "
+            "falls away into soft shadow. Waist-up portrait, slight depth of field, high-contrast "
+            "alternative fashion editorial look.",
+        ),
+        (
+            "1girl, solo, blonde_hair, ponytail, blue_eyes, smile, athletic, tan, white_bikini, barefoot, "
+            "jumping, arm_up, reaching, volleyball, sand, ocean, wave, blue_sky, cloud, sunlight, "
+            "lens_flare, sweat, motion_blur, full_body, outdoors, day, summer",
+            "A tanned, athletic blonde woman leaps off the sand mid-spike, one arm stretched high toward "
+            "a volleyball at the top of its arc. Her ponytail whips behind her and she is grinning, "
+            "teeth showing, sweat catching the light along her shoulders. She wears a simple white "
+            "sports bikini and is barefoot, sand still falling from her heels. Behind her the ocean "
+            "breaks in white surf under a bright blue summer sky scattered with cloud. Full-body action "
+            "shot from slightly below, hard midday sunlight with lens flare, a touch of motion blur in "
+            "her trailing arm.",
+        ),
+    ],
+    "mature": [
+        (
+            "1girl, solo, long_hair, black_hair, red_eyes, looking_at_viewer, blush, parted_lips, "
+            "bedroom_eyes, cleavage, bare_shoulders, thighs, black_lingerie, lace, garter_belt, "
+            "thighhighs, lying, on_back, bed, indoors, bedroom, dim_lighting, candlelight, "
+            "depth_of_field, cowboy_shot",
+            "A dark-haired woman lies back across rumpled bedsheets, propped on one elbow and looking "
+            "directly at the viewer through half-lidded red eyes, lips parted and a flush across her "
+            "cheeks. She wears black lace lingerie with a garter belt clipped to sheer thigh-highs, "
+            "shoulders bare, one knee drawn up. The bedroom around her is dim, lit low and warm by "
+            "candles just out of frame that pick out the lace and the curve of her waist. Cowboy shot "
+            "from slightly above, shallow depth of field, intimate low-key lighting and a heavy, "
+            "unhurried mood.",
+        ),
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# NaturalPromptResult
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class NaturalPromptResult:
+    """A natural-language prompt built from a Danbooru tag set.
+
+    ``prompt`` is the flowing prose intended for natural-language image models
+    (Krea, Flux and similar T5-encoder models). ``tags`` is the intermediate
+    tag set stage 1 produced, kept so the UI can show what the prose was
+    written from and so the user can still copy the tags.
+    """
+
+    prompt: str
+    tags: list[str]
+    raw_response: str
+    model: str
+    word_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.word_count:
+            object.__setattr__(self, "word_count", len(self.prompt.split()))
+
+
+# ---------------------------------------------------------------------------
 # DescriptionTagger
 # ---------------------------------------------------------------------------
 
@@ -822,6 +930,7 @@ class DescriptionTagger:
             )
             target_range = "35-50 tags"
 
+        adults_only = ADULTS_ONLY_RULE
         prompt = f"""You are a Danbooru image tagger. Convert the user's description into a
 COMPREHENSIVE comma-separated tag list, exactly like tags on a real Danbooru/Gelbooru post.
 
@@ -834,6 +943,7 @@ CRITICAL RULES:
 - Tag COLORS of items: black_boots, red_skirt, white_shirt
 - Aim for {target_range}. Real Danbooru posts have 30-50+ tags. MORE IS BETTER.
 - Do NOT contradict the description.
+- {adults_only}
 {extra_rules}
 
 CATEGORY CHECKLIST — cover all that apply:
@@ -965,8 +1075,11 @@ Now output ONLY the comma-separated tags for the user's description."""
 
     # Tags that are ONLY acceptable when the description explicitly mentions them.
     # These are blocked in post-processing to prevent LLM hallucination.
+    # Minor age-descriptors (loli, shota, child, ...) are NOT on this list:
+    # they are unconditionally removed by backend.content_policy, regardless
+    # of what the description says. See that module for why.
     _SENSITIVE_TAGS: set[str] = {
-        "loli", "child", "trap", "futanari", "shota",
+        "trap", "futanari",
         "rape", "tentacles", "bestiality", "guro", "vore",
         "necrophilia", "scat", "watersports", "urination",
     }
@@ -1104,7 +1217,11 @@ Now output ONLY the comma-separated tags for the user's description."""
         # Step 2: threshold filter
         tags = self.tag_index.filter_by_threshold(tags)
 
-        # Step 3: block sensitive tags unless description explicitly mentions them
+        # Step 3 (always, every mode): never emit minor age-descriptor tags.
+        # This is the app's own rule, not the model's — see content_policy.
+        tags = strip_minor_terms(tags, creativity)
+
+        # Step 3a: block sensitive tags unless description explicitly mentions them
         if description:
             desc_lower = description.lower()
             tags = [t for t in tags if t not in self._SENSITIVE_TAGS
@@ -1961,6 +2078,7 @@ Now output ONLY the comma-separated tags for the user's description."""
                 "things like clothing, atmosphere, lighting, expressions, body language,\n"
                 "objects, and style cues."
             )
+        task_instruction += f"\n{ADULTS_ONLY_RULE}"
 
         return f"""You are a Danbooru-style tag enricher. The user gives you a list of seed tags.
 {task_instruction}
@@ -2157,6 +2275,468 @@ Now output ONLY the comma-separated ADDITIONAL tags that complement the user's s
         return DescriptionTagResult(
             tags=final_tags[:target_tags],
             raw_response=best_raw or raw_text_final,
+            model=self.model,
+        )
+
+    # ------------------------------------------------------------------
+    # Natural-language prompt generation  (stage 2: tags -> prose)
+    # ------------------------------------------------------------------
+
+    # Target prose length. Natural-language image models (Krea, Flux and
+    # similar T5-encoder models) condition well on a descriptive paragraph;
+    # past roughly this range the extra tokens mostly dilute the subject.
+    _PROSE_TARGET_WORDS: tuple[int, int] = (70, 110)
+
+    # Minimum words before a prose attempt is accepted. Well below the target
+    # range — this only rejects a truncated or refused generation.
+    _PROSE_MIN_WORDS = 35
+
+    # Hard ceiling. Models routinely blow past the stated target range, and an
+    # over-long prompt dilutes the subject on these encoders, so anything past
+    # this is trimmed back to a sentence boundary. Set above the target range
+    # so a slightly long-but-complete paragraph survives intact.
+    _PROSE_MAX_WORDS = 130
+
+    _PROSE_MODE_RULES: dict[str, str] = {
+        "safe": (
+            "CONTENT: Keep the description entirely non-sexual. Describe clothing, "
+            "pose and setting plainly. No nudity, no suggestive framing."
+        ),
+        "creative": (
+            "CONTENT: Stay non-explicit unless the tags clearly call for otherwise. "
+            "Rich visual detail is the goal — materials, textures, light, atmosphere."
+        ),
+        "mature": (
+            "CONTENT: Adult content is permitted. Describe bodies, state of dress, "
+            "acts and expressions directly and in plain language as the tags "
+            "indicate. Keep it descriptive prose, never a clinical tag list. "
+            + ADULTS_ONLY_RULE
+        ),
+    }
+
+    def _no_think_prefix(self) -> str:
+        """Return the '/no_think' directive when the active model needs it.
+
+        qwen3 variants (except the already non-thinking instruct-2507 branch)
+        burn their generation budget on a <think> block unless told otherwise.
+        """
+        model_lower = self.model.lower()
+        is_qwen3_thinking = (
+            "qwen3" in model_lower
+            and "instruct-2507" not in model_lower
+            and "instruct_2507" not in model_lower
+        )
+        if is_qwen3_thinking:
+            return self._MODEL_PREFILLS.get("qwen3_no_think") or ""
+        return ""
+
+    def _build_prose_system_prompt(self, creativity: str) -> str:
+        """Build the system prompt that turns a tag set into a prose prompt."""
+        if creativity not in self._VALID_CREATIVITIES:
+            creativity = self.DEFAULT_CREATIVITY
+
+        lo, hi = self._PROSE_TARGET_WORDS
+        mode_rules = self._PROSE_MODE_RULES.get(creativity, "")
+
+        return f"""You write prompts for natural-language image models (Krea, Flux and
+similar). The user gives you a Danbooru tag set. You rewrite it as ONE flowing
+paragraph of descriptive English that reads like a person describing a
+photograph or illustration out loud.
+
+CRITICAL RULES:
+- Output ONE paragraph of plain prose. Nothing else.
+- Do NOT write <think> or reasoning blocks. Write the paragraph immediately.
+- NEVER output a comma-separated tag list. Write real sentences.
+- NEVER use underscores. "black_hair" becomes "black hair".
+- NEVER use weight syntax like (detailed:1.3) or ((emphasis)). It does nothing
+  on these models.
+- NEVER add quality spam like "masterpiece, best quality, 4k, highres,
+  absurdres". Those are booru-model habits and are pure noise here.
+- Do NOT write a negative prompt, a title, a preamble, or commentary.
+- Do NOT wrap the output in quotes or markdown.
+
+WHAT TO WRITE:
+- Open with the main subject in the very first clause — these models weight
+  early tokens most heavily. Start with the person or object, not the setting.
+- Then work outward in this order: appearance (hair, eyes, build, skin),
+  clothing with materials and colors, pose and action, the setting and its
+  objects, lighting, then mood.
+- Close with the shot: framing, camera angle, lens or depth-of-field feel, and
+  the overall style or medium.
+- Convert every tag faithfully. Do not silently drop the distinctive ones.
+- NEVER contradict a tag. If boots are tagged she is not barefoot; if a shirt
+  is tagged she is not topless; if it is tagged night the sky is not sunlit.
+  Re-read the tags before you write each clause.
+- You may add small neutral connective detail to make sentences read naturally,
+  but never a new garment, body feature, object or time of day the tags do not
+  mention.
+- Merge related tags into natural phrases: "long_hair, black_hair, twintails"
+  becomes "long black hair in twintails", not three separate clauses.
+- LENGTH IS A HARD LIMIT: {lo}-{hi} words, and never more than {hi}. Write
+  tight, information-dense sentences and stop. A long prompt is a worse prompt
+  — it dilutes the subject. Do not pad.
+{mode_rules}
+
+Write only the paragraph."""
+
+    def _build_prose_generation_prompt(
+        self,
+        tags: list[str],
+        description: str,
+        creativity: str,
+        seed_tags_mode: bool = False,
+    ) -> str:
+        """Build the user message for the prose stage: few-shot + tags + intent."""
+        examples = _PROSE_FEWSHOT.get(creativity, _PROSE_FEWSHOT["creative"])
+
+        # Deterministically rotate the few-shot pair so re-runs on the same
+        # input stay stable while different inputs see different examples.
+        seed = hashlib.md5(",".join(tags).encode("utf-8")).hexdigest()
+        start = int(seed[:8], 16) % max(1, len(examples))
+        ordered = examples[start:] + examples[:start]
+
+        parts: list[str] = []
+        for ex_tags, ex_prose in ordered[:2]:
+            parts.append(f"TAGS:\n{ex_tags}\n\nPROMPT:\n{ex_prose}")
+
+        tag_line = ", ".join(tags)
+        block = [f"TAGS:\n{tag_line}"]
+
+        # Give the model the user's own words as intent context. It anchors the
+        # subject and tone; the tags remain the source of visual truth.
+        original = (description or "").strip()
+        if original and not seed_tags_mode:
+            block.append(
+                f"\nThe user originally asked for: \"{original}\"\n"
+                "Honour that intent, but describe everything the tags list."
+            )
+
+        parts.append("\n\n".join(block) + "\n\nPROMPT:")
+        return "\n\n---\n\n".join(parts)
+
+    # -- prose post-processing -----------------------------------------
+
+    _PROSE_META_LINE = re.compile(
+        r"^\s*(?:note|tip|explanation|word count|this (?:prompt|description|paragraph)|"
+        r"i hope|hope this|let me know|feel free)\b",
+        re.IGNORECASE,
+    )
+
+    # Reasoning that leaks as plain text rather than inside a <think> block —
+    # qwen3 does this regularly, both before and after the actual paragraph.
+    # Matched per sentence, so one leaked sentence does not discard the prose.
+    _PROSE_META_SENTENCE = re.compile(
+        r"\b(?:okay,?\s+(?:let'?s|so)|let'?s see|let me (?:see|think|start|know|write)|"
+        r"i (?:need|should|will|have|'ll|'m going) to|i'?ll (?:write|start|convert)|"
+        r"the user (?:wants|asked|said|originally|gave|provided)|"
+        r"based on (?:the|these) (?:user|given|provided|instructions|tags provided)|"
+        r"the prompt is built|according to the instructions|as an ai|"
+        r"word count|per the instructions|first,? i)\b",
+        re.IGNORECASE,
+    )
+
+    # A meta preamble that hands off into the real description mid-sentence.
+    # Everything up to and including the handoff phrase is commentary.
+    _PROSE_LEAD_HANDOFF = re.compile(
+        r"^.{0,240}?\b(?:the prompt is built around|the (?:image|scene) "
+        r"(?:shows|depicts|features)|here'?s the (?:prompt|paragraph)[:,]?)\s+",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @classmethod
+    def _clean_prose_output(cls, text: str) -> str:
+        """Scrub LLM prose down to a single clean paragraph.
+
+        Removes reasoning blocks, markdown, tag-model syntax the prose stage
+        must never emit (underscores, attention weights), and the trailing
+        commentary chatty models like to append.
+        """
+        if not text:
+            return ""
+
+        # Reasoning blocks — closed, or dangling in either direction when the
+        # stop sequence cut the generation mid-block.
+        text = re.sub(r"<think>.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"^.*?</think>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r"<think>.*$", " ", text, flags=re.DOTALL | re.IGNORECASE)
+
+        # Code fences and leading labels ("Prompt:", "Here is the prompt:").
+        text = re.sub(r"```[a-zA-Z]*", " ", text)
+        text = text.replace("```", " ")
+        text = re.sub(
+            r"^\s*(?:here(?:'s| is)[^:\n]{0,60}:|prompt\s*:|output\s*:|answer\s*:)\s*",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        )
+
+        # Attention weights: (foo:1.3) -> foo, ((foo)) -> foo. Loop for nesting.
+        for _ in range(3):
+            new = re.sub(r"\(([^()]*?):\s*-?\d+(?:\.\d+)?\)", r"\1", text)
+            new = re.sub(r"\(\(([^()]*?)\)\)", r"\1", new)
+            if new == text:
+                break
+            text = new
+
+        # Drop trailing commentary lines, bullets and blank lines; the result
+        # must read as one paragraph.
+        kept: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if cls._PROSE_META_LINE.match(stripped):
+                continue
+            stripped = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s+", "", stripped)
+            kept.append(stripped)
+        text = " ".join(kept)
+
+        # Underscores are a tag-format artefact — never valid in prose output.
+        text = re.sub(r"(?<=\w)_(?=\w)", " ", text)
+        text = text.replace("_", " ")
+
+        # Remaining markdown noise, then whitespace normalisation.
+        text = re.sub(r"[*`#>\[\]]+", " ", text)
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # A meta preamble that runs into the real description: keep only the
+        # part after the handoff phrase.
+        handoff = cls._PROSE_LEAD_HANDOFF.match(text)
+        if handoff:
+            text = text[handoff.end():].lstrip("\"'“‘( ")
+            if text:
+                text = text[0].upper() + text[1:]
+
+        # Drop whole sentences that are leaked reasoning rather than description.
+        sentences = re.findall(r"[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$", text)
+        if len(sentences) > 1:
+            kept_sentences = [
+                s for s in sentences if not cls._PROSE_META_SENTENCE.search(s)
+            ]
+            if kept_sentences:
+                text = "".join(kept_sentences).strip()
+
+        # Unbalanced quotes/parens left behind by a stripped preamble.
+        text = text.strip("\"'“”‘’ ")
+        if text.count("(") != text.count(")"):
+            text = text.replace("(", "").replace(")", "")
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # Strip symmetric wrapping quotes.
+        if len(text) >= 2 and text[0] in "\"'“‘" and text[-1] in "\"'”’":
+            text = text[1:-1].strip()
+
+        # Close an unterminated final sentence.
+        if text and text[-1] not in ".!?":
+            text = text.rstrip(",;: ") + "."
+
+        return text
+
+    @classmethod
+    def _contains_meta_leak(cls, text: str) -> bool:
+        """True when reasoning/commentary survived cleanup.
+
+        Used as a retry trigger: a leaked attempt is regenerated rather than
+        handed to the user, since cleanup cannot catch every phrasing.
+        """
+        return bool(text) and bool(cls._PROSE_META_SENTENCE.search(text))
+
+    @classmethod
+    def _trim_to_word_budget(cls, text: str) -> str:
+        """Cut prose back to ``_PROSE_MAX_WORDS`` at a sentence boundary.
+
+        Models regularly overshoot the stated range, and an over-long prompt
+        dilutes the subject on these encoders. Trimming at a sentence boundary
+        keeps the result readable; a mid-sentence cut would not.
+        """
+        words = text.split()
+        if len(words) <= cls._PROSE_MAX_WORDS:
+            return text
+
+        # Walk sentences, keeping the longest prefix that fits the budget.
+        sentences = re.findall(r"[^.!?]*[.!?]+(?:\s|$)|[^.!?]+$", text)
+        kept: list[str] = []
+        used = 0
+        for sentence in sentences:
+            n = len(sentence.split())
+            if used + n > cls._PROSE_MAX_WORDS and kept:
+                break
+            kept.append(sentence)
+            used += n
+
+        trimmed = "".join(kept).strip()
+        # The loop always keeps the first sentence so it can never return
+        # nothing — which means a single runaway sentence arrives here still
+        # over budget. Hard-cut it and close it off.
+        if not trimmed or len(trimmed.split()) > cls._PROSE_MAX_WORDS:
+            trimmed = " ".join(words[: cls._PROSE_MAX_WORDS]).rstrip(",;: ") + "."
+        return trimmed
+
+    @staticmethod
+    def _looks_like_tag_list(text: str) -> bool:
+        """True when the model ignored the format and emitted tag soup."""
+        if not text:
+            return True
+        segments = [s.strip() for s in text.split(",") if s.strip()]
+        if len(segments) < 8:
+            return False
+        avg_words = sum(len(s.split()) for s in segments) / len(segments)
+        # Real prose averages well above three words between commas.
+        return avg_words < 3.0
+
+    @staticmethod
+    def _prose_fallback(tags: list[str]) -> str:
+        """Deterministic last-resort prose when every LLM attempt fails.
+
+        Not as good as a generated paragraph, but it keeps the feature from
+        returning nothing when Ollama is having a bad day.
+        """
+        if not tags:
+            return ""
+        readable = [t.replace("_", " ") for t in tags]
+        subject = readable[0]
+        rest = readable[1:]
+        if not rest:
+            return f"A detailed image of {subject}."
+        body = ", ".join(rest[:-1])
+        tail = rest[-1]
+        joined = f"{body} and {tail}" if body else tail
+        return (
+            f"A detailed image of {subject}, showing {joined}. "
+            "Natural lighting, clear composition, high level of detail."
+        )
+
+    def generate_natural_prompt(
+        self,
+        description: str,
+        creativity: str = DEFAULT_CREATIVITY,
+        seed_tags_mode: bool = False,
+        tag_result: Optional[DescriptionTagResult] = None,
+    ) -> NaturalPromptResult:
+        """Generate a natural-language prompt for Krea/Flux-style models.
+
+        Runs in two stages. Stage 1 produces a Danbooru tag set through the
+        existing pipeline (``generate_tags``, or ``enrich_tags`` when
+        *seed_tags_mode* is set), so the prose inherits vocabulary grounding,
+        concept expansion, dedup and conflict resolution. Stage 2 rewrites that
+        cleaned tag set as one flowing paragraph.
+
+        Pass *tag_result* to reuse tags already generated and skip stage 1.
+
+        Retries the prose stage up to 3 times when the model returns something
+        truncated or still tag-shaped, nudging temperature each time.
+        """
+        if not description or not description.strip():
+            raise ValueError("Description cannot be empty")
+
+        creativity = (creativity or self.DEFAULT_CREATIVITY).strip().lower()
+        if creativity not in self._VALID_CREATIVITIES:
+            creativity = self.DEFAULT_CREATIVITY
+
+        if not self.check_connection():
+            raise RuntimeError(
+                f"Cannot connect to Ollama at {self.host}. "
+                "Make sure Ollama is running: ollama serve"
+            )
+
+        # --- Stage 1: description/seeds -> cleaned Danbooru tags ---------
+        if tag_result is None:
+            if seed_tags_mode:
+                tag_result = self.enrich_tags(description, creativity=creativity)
+            else:
+                tag_result = self.generate_tags(description, creativity=creativity)
+
+        tags = list(tag_result.tags)
+        if not tags:
+            raise RuntimeError(
+                "Stage 1 produced no tags, so there is nothing to write a prompt "
+                "from. Try a more specific description."
+            )
+
+        # --- Stage 2: tags -> prose --------------------------------------
+        system_prompt = self._build_prose_system_prompt(creativity)
+        gen_prompt = self._build_prose_generation_prompt(
+            tags, description, creativity, seed_tags_mode=seed_tags_mode
+        )
+        no_think = self._no_think_prefix()
+        if no_think:
+            gen_prompt = f"{no_think}\n\n{gen_prompt}"
+
+        max_attempts = 3
+        base_temp = 0.70
+        best_prose = ""
+        raw_final = ""
+        last_error: Exception | None = None
+
+        for attempt in range(max_attempts):
+            try:
+                temp = min(1.05, base_temp + 0.10 * attempt)
+                response = self.client.generate(
+                    model=self.model,
+                    prompt=gen_prompt,
+                    system=system_prompt,
+                    options={
+                        "temperature": temp,
+                        "top_p": 0.92,
+                        "top_k": 50,
+                        # Prose repeats connectives naturally; a tag-level
+                        # repeat penalty makes it read strangely.
+                        "repeat_penalty": 1.05,
+                        # Sized for the word budget plus the overshoot these
+                        # models reliably produce; _trim_to_word_budget handles
+                        # the rest. Keeping it tight also keeps stage 2 fast.
+                        "num_predict": 220,
+                        "stop": ["<think>", "\n\nTAGS:", "\n\n---", "\n\nNote:"],
+                    },
+                    stream=False,
+                )
+                raw_final = response.get("response", "").strip()
+                prose = self._trim_to_word_budget(self._clean_prose_output(raw_final))
+
+                usable = (
+                    len(prose.split()) >= self._PROSE_MIN_WORDS
+                    and not self._looks_like_tag_list(prose)
+                    and not self._contains_meta_leak(prose)
+                )
+
+                # Only track a clean attempt as "best" — a longer but leaked
+                # attempt must never beat a shorter clean one.
+                if usable and len(prose.split()) > len(best_prose.split()):
+                    best_prose = prose
+
+                if usable:
+                    return NaturalPromptResult(
+                        prompt=prose,
+                        tags=tags,
+                        raw_response=raw_final,
+                        model=self.model,
+                    )
+                # Otherwise loop to retry
+
+            except Exception as e:
+                last_error = e
+                if "connect" in str(e).lower() or "refused" in str(e).lower():
+                    raise RuntimeError(f"Prompt generation failed: {e}")
+
+        # Exhausted retries. best_prose only ever holds a clean attempt, so
+        # fall back to the deterministic paragraph when it is empty.
+        if best_prose:
+            return NaturalPromptResult(
+                prompt=best_prose,
+                tags=tags,
+                raw_response=raw_final,
+                model=self.model,
+            )
+
+        if last_error is not None and not best_prose:
+            raise RuntimeError(
+                f"Prompt generation failed after retries: {last_error}"
+            )
+
+        return NaturalPromptResult(
+            prompt=self._prose_fallback(tags),
+            tags=tags,
+            raw_response=raw_final,
             model=self.model,
         )
 

@@ -24,7 +24,6 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "solo", "solo_focus", "no_humans",
         "male_focus", "female_focus",
         "couple", "trap", "futanari",
-        "loli", "shota", "child",
         "mature_female", "mature_male",
     ],
     "clothing": [

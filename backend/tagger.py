@@ -13,6 +13,8 @@ from typing import Iterable, Sequence
 import numpy as np
 import onnxruntime as ort
 from huggingface_hub import hf_hub_download
+
+from backend.content_policy import is_blocked_minor_tag
 from PIL import Image
 
 
@@ -166,6 +168,18 @@ def _save_config(config: dict) -> None:
         _config_path().write_text(json.dumps(config, indent=2), encoding="utf-8")
     except Exception as exc:  # pragma: no cover - best-effort persistence
         warnings.warn(f"Could not persist tagger config: {exc}", RuntimeWarning, stacklevel=2)
+
+
+def get_config_value(key: str, default=None):
+    """Read one persisted app setting from ~/.img_tagger/config.json."""
+    return _load_config().get(key, default)
+
+
+def set_config_value(key: str, value) -> None:
+    """Persist one app setting to ~/.img_tagger/config.json."""
+    config = _load_config()
+    config[key] = value
+    _save_config(config)
 
 
 def get_selected_model() -> str:
@@ -393,6 +407,9 @@ class AnimeTagger:
 
         for index, score in enumerate(scores[: len(self.tags)]):
             record = self.tags[index]
+            if is_blocked_minor_tag(record.name):
+                # Never emit sexual minor age-descriptors (see content_policy).
+                continue
             tag_name = record.name.replace("_", " ")
             prediction = TagPrediction(tag=tag_name, confidence=float(score), category=record.category)
             if record.category == 9:

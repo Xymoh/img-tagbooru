@@ -19,4 +19,7 @@ if (-not (Test-Path $python)) {
     --add-data "frontend;frontend" `
     --add-data "backend;backend" `
     --add-data "danbooru_tags_post_count.csv;." `
+    --add-data "TERMS.md;." `
+    --add-data "THIRD_PARTY_NOTICES.txt;." `
+    --add-data "LICENSE;." `
     frontend\native\main_window.py

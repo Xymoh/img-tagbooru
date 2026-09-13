@@ -2,7 +2,7 @@
 
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support%20Development-ff5e5b?logo=ko-fi&logoColor=white)](https://ko-fi.com/saekimon)
 
-A local, offline Danbooru-style image tagging tool for anime/illustration workflows. Tag images automatically with an ONNX vision model, or generate tags from text descriptions using a local LLM — no cloud APIs, no content restrictions, fully private.
+A local, offline Danbooru-style image tagging tool for anime/illustration workflows. Tag images automatically with an ONNX vision model, or generate tags from text descriptions using a local LLM — no cloud APIs, no telemetry, fully private. Adult content is left to you and the models you install; the one hard rule is in [Legal, privacy and attribution](#legal-privacy-and-attribution).
 
 Built for LoRA trainers, dataset curators, and anyone who needs clean Danbooru-format captions.
 
@@ -18,6 +18,9 @@ This tool serves as a vast expansion of my initial tool: [Tagbooru](https://xymo
 | **Switchable Recognition Models** | Download, update, and choose between WD tagger models in-app |
 | **Description → Tags** | Describe a scene in English, get 30-50 Danbooru tags |
 | **Tag Enrichment** | Provide seed tags, get them expanded into a full tag set |
+| **Natural-Language Prompts** | Output a prose prompt for Krea / Flux instead of booru tags |
+| **Image → Prompt (photos)** | Caption a photo directly with a local vision model |
+| **Image → Video Prompt** | Turn a still into a Wan 2.2 image-to-video prompt |
 | **Batch Processing** | Tag entire folders at once |
 | **Caption Editor** | Edit, reorder, filter, blacklist/whitelist tags |
 | **Export** | Save `.txt` captions per image, or export as ZIP |
@@ -75,6 +78,126 @@ Your selection is remembered between sessions. All models share the same BGR/squ
 
 ---
 
+## Image-to-Prompt (Photographs)
+
+**The ONNX taggers are for anime and illustration.** They're trained on Danbooru, so on a photograph they don't just get thin — they fail structurally. On a real test photo the tagger returned 80 tags, roughly a third wrong or self-contradictory:
+
+- `painting (medium)`, `acrylic paint (medium)`, `traditional media` — on a photograph
+- `dress` + `shirt` + `camisole` + `tank top` + `white dress` + `white shirt` — six mutually exclusive garments
+- `black hair` + `brown hair`, `brown eyes` + `black eyes`, `large breasts` + `medium breasts`
+- `hatsune miku (cosplay)` — an anime character projected onto a real person
+
+No threshold setting fixes this; photos are out of domain. And booru tags have **no vocabulary at all** for lighting, camera framing, depth of field, or the character of a room — so nothing downstream can recover them.
+
+For photos, use **📝 Write Prompt from Image** in the Batch Tagger caption toolbar. A local vision model describes the picture directly: one call, no tags in between. On the same photo it reported window light, the makeup brush on the desk, "bedroom or personal space", selfie framing, medium close-up, slight upward angle and soft focus.
+
+### Setup
+
+Requires a vision model pulled through Ollama. The repo publishes **no `latest` tag**, so name the quant explicitly — a bare `ollama pull` of it will 404:
+
+```powershell
+ollama pull aha2025/llama-joycaption-beta-one-hf-llava:Q8_0
+```
+
+| Quant | Size | Notes |
+|-------|------|-------|
+| **Q8_0** ⭐ | 9.42 GB | Best quality; fits a 16 GB card on its own |
+| Q6_K | 7.47 GB | Near-Q8, a little smaller |
+| Q5_K_M | 6.61 GB | Middle ground |
+| Q4_K_M | 5.80 GB | Leaves room to keep a text LLM resident alongside it |
+
+[JoyCaption](https://github.com/fpgaminer/joycaption) is purpose-built for captioning images to prompt and train diffusion models, and is uncensored by design — stock VLMs refuse or sanitise a lot of this tool's subject matter.
+
+> **VRAM note:** on 16 GB, JoyCaption Q8 (9.4 GB) and qwen3-14b (9 GB) won't both stay resident — Ollama unloads one to load the other, costing a reload when you alternate. Q4_K_M keeps both in memory at ~14.8 GB.
+
+### Using it
+
+- **No tagging pass needed** — load images and caption them straight away
+- **Caption styles:** the descriptive styles give flowing prose (what Krea/Flux want); "Stable Diffusion prompt" returns comma-separated fragments instead
+- **Speed:** first run loads the model into VRAM and takes ~a minute; after that roughly 1-6s per image
+- **Batch:** caption a whole folder; one failure doesn't sink the run
+- **Saving:** files are written as `<name>_prompt.txt`, so they never overwrite the `<name>.txt` tag captions used for LoRA training
+
+### Narration hint
+
+A free-text **Narration hint** field steers how the description is written — *"cinematic film-noir tone"*, *"clinical and factual"*, *"emphasise texture and fabric"*. It's folded into the caption request immediately after the base instruction rather than appended, because position drives register here (the same finding as the explicit options below).
+
+**It works far better on video prompts than on image captions**, and it's worth knowing why before you rely on it:
+
+| Stage | Model | Effect |
+|-------|-------|--------|
+| Motion / video prompt | qwen3 (general instruction-follower) | **Strong.** "film-noir" produced *"a quiet hesitation… a silent question to the silence"*; "nature documentary" produced *"as if the room itself is exhaling"*. |
+| Image caption | JoyCaption (template fine-tuned) | **Weak.** "film-noir" only shifted it toward framing language — *"a close-up, slightly low-angle shot"* — with none of the mood. |
+
+JoyCaption is fine-tuned on a fixed set of instruction templates, which is exactly why its own caption styles and extra options work so reliably, and why free-text style instructions sit outside what it was trained to follow. For strong stylistic control over an image caption, the built-in styles and options are the effective lever; the hint is a nudge.
+
+> **Trade-off worth knowing:** a heavy stylistic hint buys atmosphere at the cost of concrete motion. The film-noir video prompt above is better prose but arguably a *worse* Wan prompt — "a silent question to the silence" gives the model nothing to animate. Keep hints light when the output is going straight into generation.
+
+The hint is deliberately **not** applied to the MMAudio prompt, which has a strict two-line format and a 77-token budget.
+
+### Explicit content
+
+JoyCaption is uncensored, but that isn't the whole story: a **formal register still euphemises**. Ask for a caption "in a formal tone" and suggestive imagery comes back as "modest cleavage" and "enhancing her natural beauty" — the model isn't refusing, it's being polite.
+
+Tick **🔞 Explicit** to switch to a casual tone and instruct the model to describe anatomy and state of dress directly. Side by side on the same photo:
+
+| | Formal | Explicit |
+|---|---|---|
+| Wording | "reveals moderate cleavage" | "low neckline, showing some cleavage" |
+| Lighting | "bright, natural light from a window" | "Bright lighting from the left" |
+| Framing | "slightly above eye level" | "slightly above eye level, from the chest up" |
+
+### Wan 2.2 video prompts
+
+The same dialog's **Output** dropdown can turn a still into an image-to-video prompt, in two shapes:
+
+**Second-by-second timeline** — one beat per second, on one line:
+
+```
+(At 0 seconds: The woman blinks slowly, eyes flickering with subtle focus as the camera gently tilts up slightly.) (At 1 seconds: Her head tilts to the left, a faint smile forming, while the camera drifts slightly backward.) (At 2 seconds: Her fingers trace the silver pendant, as the camera slowly pulls back.) (At 3 seconds: She shifts her weight to the left, shoulder slightly lowered, as the camera tilts down toward her chest.) (At 4 seconds: Her gaze softens, eyes half-lidded, as the camera drifts leftward, following her line of sight.)
+```
+
+**Flowing paragraph** — the same motion as continuous prose. Clip length is adjustable from 2 to 20 seconds (timeline only).
+
+The 20s ceiling is a reliability bound on the timeline format, not a Wan limit. Past roughly 15 seconds the model starts dropping beats, so a near-complete timeline is accepted after the first retry rather than burning attempts chasing the last one — and if it still comes up short, the output says so rather than quietly handing the video model fewer seconds than you asked for.
+
+**Why this runs two models.** Asking the vision model to plan motion directly does not work — it's a captioner, so it describes what *is*. Tested head-on, it filled every beat with "hair remains mostly in place", "camera angle is the same", "no significant changes", contradicted the image about which hand was raised, and broke the output format. So the vision model describes the first frame, and the **text** model (the same one the Description Tagger uses) invents what happens next. It's told never to restate anything the first frame already fixes, and the words "remains", "continues" and "unchanged" are banned outright.
+
+> **Cost:** two models means a VRAM swap on a 16 GB card — roughly 20s for the first image, faster after. The stage-2 text model is selectable in the dialog.
+
+Video prompts save as `<name>_video.txt`, colliding with neither the image prompts nor the tag captions.
+
+### MMAudio prompts
+
+**🔊 Also write an MMAudio prompt** (on by default in video modes) writes the soundtrack for the same clip, and appears below the video prompt. MMAudio takes both a positive and a negative prompt, so both are generated:
+
+```
+POSITIVE: gravel crunching underfoot, distant rustle of wind through leaves, soft breaths
+NEGATIVE: music, speech, distortion, clipping, car engine, birdsong
+```
+
+It's built from the motion *and* the first frame — the motion decides the event sounds, the still decides the room tone. The text model is already resident from the video stage, so it costs a few seconds and no extra VRAM swap. `🔊 Copy Audio` copies the positive; Shift-click copies the negative.
+
+**Why there's no per-second audio timeline.** MMAudio doesn't work that way, for two independent reasons. Its text and video features are *pooled* and injected as global conditioning, so word order and timestamps collapse into a single vector — `(At 3 seconds: …)` means nothing more to it than the same words shuffled. And temporal placement doesn't come from the text at all: it comes from Synchformer features sampled at 24fps from the video, which is what actually decides *when* each sound lands. The video already carries the timing; the prompt only has to say *what*. On top of that, text goes through CLIP's 77-token window — a five-beat timeline would exceed it on its own.
+
+Three things are enforced in code rather than left to the prompt:
+
+- **Visual terms are stripped from the positive.** Asked for sounds, it produced "soft focus shift" — a camera move described as audio. Items containing focus/camera/angle/lighting/framing/shot/zoom/blur are dropped.
+- **The negative can't mute what the positive asked for.** One run excluded "ambient room sounds" while the positive requested room tone. Items naming ambience, breathing, moaning, skin or rustling are removed from the negative, which is capped at six.
+- **Both prompts are trimmed to CLIP's 77-token window**, dropping whole comma-separated items so they never end mid-phrase. Past that limit MMAudio silently discards the rest, which would quietly lose the tail of a soundscape. Typical output sits at 21–39 tokens, so this rarely fires — it exists so a verbose run can't fail invisibly.
+
+Batch saves put audio in its own `<name>_audio.txt`, so a pipeline can consume video and audio prompts separately.
+
+### Vulgar slang
+
+Explicit mode also reorders what the model covers: body, pose and state of dress first, lighting and camera afterwards. Without that, requesting lighting *and* camera angle *and* a content rating eats the word budget and the caption never says what is actually exposed.
+
+The toggle applies to **video prompts too** — with it off, the motion stage writes tame beats ("she blinks slowly, lashes fluttering") no matter how explicit the still is.
+
+There's also a separate **Vulgar slang** checkbox. It's worth knowing what it does before reaching for it: it's tuned for training-caption realism, not prompt quality. In testing it traded descriptive precision for slang — "natural light from a window on the right" collapsed to "lighting's bright" — and profanity isn't a visual descriptor a diffusion model can act on. Useful for captioning a training set; usually counterproductive for prompting.
+
+---
+
 ## Description-to-Tags
 
 Describe what you want to see in plain English. The AI generates a comprehensive Danbooru-style tag set — the kind you'd find on a real Danbooru/Gelbooru post with 30-50+ tags covering every visual element.
@@ -112,6 +235,36 @@ messy_hair, knee_boots, pale_skin, eyeliner, arm_warmers, studded_belt, black_ar
 ### Tag Enrichment Mode
 
 Already have some tags? Switch to enrichment mode and provide seed tags like `1girl, witch_hat, forest, broom, night`. The AI expands them into a full 30-50 tag set with complementary clothing, atmosphere, lighting, and detail tags.
+
+### Output Format: Danbooru Tags or Natural Language
+
+Danbooru tags are the right format for SDXL-anime models (Illustrious, NoobAI, Pony). They are the *wrong* format for models that read plain English — Krea, Flux and similar T5-encoder models are trained on descriptive captions, and a comma-separated tag dump conditions them poorly.
+
+The **Output format** dropdown picks which you get. It's independent of the input mode, so all four combinations work:
+
+| | → Danbooru Tags | → Natural Language |
+|---|---|---|
+| **From Description** | comma-separated tags | prose prompt |
+| **From Seed Tags** | enriched tag set | prose prompt from your tags |
+
+That last cell is the quick path for converting an existing booru caption into a Krea prompt.
+
+**Two-stage generation.** Natural-language output doesn't just paraphrase your description — it runs the full tag pipeline first, then rewrites the finished tag set as prose. The prompt inherits everything the pipeline adds, so the paragraph describes detail you never typed.
+
+**Input:** `a girl, emo, black hair` → **stage 1:** 35 tags → **stage 2 (109 words):**
+
+> A pale girl with long black hair in messy twintails and sidelocks stands in a full-body shot, her fringe falling over one eye. She wears a black t-shirt, long-sleeved black arm warmers, a pleated black skirt, and black knee-high boots, paired with a black choker and a studded belt at her waist. Her nails are painted black, and she has subtle ear piercings and a black hair ornament tucked into her hair. The background is simple, soft-focused with bokeh, against a deep red backdrop. She stands slightly off-center, caught in a moment of quiet intensity, lit with a slight depth of field and soft focus, capturing an emo aesthetic.
+
+**What the prose stage does differently:**
+- Front-loads the subject in the first clause — these models weight early tokens most heavily
+- Works outward: appearance → clothing → pose → setting → lighting → mood, closing on framing, camera angle and style
+- Never emits underscores, `(weight:1.3)` syntax, or `masterpiece, best quality, highres` spam — booru-model habits that do nothing here
+- Won't contradict a tag (no "barefoot" against a `boots` tag, no sunlight in a `night` scene)
+- Targets 70-110 words, hard-capped at 130 — an over-long prompt dilutes the subject
+
+**Cost:** roughly twice the wall time of tag output (two LLM calls; ~5s total with a warm model on the recommended 14B). The status bar shows which stage is running, and a `🏷️ Copy Source Tags` button appears afterwards so one run gives you both the prompt and the tag set.
+
+> **Note:** Creativity mode still applies — it shapes stage 1, and the prose stage carries the same content rules through. Safe stays clean, Mature stays explicit.
 
 ### Writing Better Descriptions
 
@@ -162,8 +315,8 @@ The raw LLM output goes through a deterministic pipeline that ensures quality:
 
 ```powershell
 # Clone the repo
-git clone https://github.com/Xymoh/img-tagbooru.git
-cd img-tagbooru
+git clone https://github.com/Xymoh/img-tagboru-ai.git
+cd img-tagboru-ai
 
 # Create virtual environment
 python -m venv .venv
@@ -234,11 +387,38 @@ Purpose-built for image prompts. Thinner atmospheric coverage but good for rapid
 - **huihui_ai/qwen3-abliterated:30b-a3b-q4_K_M** — Thinking-mode variant. Reasoning tokens consume the generation budget, produces empty output.
 - Any Qwen3 variant without `instruct-2507` in the name (thinking mode wastes tokens)
 
-### Untested (May Work)
+### Alternatives (sizes verified against the Ollama registry)
 
-- `huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M` — Non-thinking MoE, ~18 GB
-- `huihui_ai/qwen2.5-abliterate:14b-instruct-q4_K_M` — Qwen2.5, no thinking mode
-- `Fermi/Cydonia-24B-v4.3-heretic-vision:Q4_K_M` — Dense 24B, uncensored creative
+| Model | Size | 16 GB card | Notes |
+|-------|------|-----------|-------|
+| `huihui_ai/mistral-small-abliterated:24b` | 14.33 GB | fits | Mistral Small 24B, **non-thinking** — no `<think>` block to leak. The usual pick for uncensored prose. |
+| `huihui_ai/qwen2.5-abliterate:14b-instruct-q4_K_M` | 8.99 GB | fits | Qwen2.5, no thinking mode. Same footprint as the default. |
+| `Fermi/Cydonia-24B-v4.3-heretic-vision:Q4_K_M` | 15.22 GB | tight | Ships a **vision projector** — could in principle serve both stages and avoid the VRAM swap. Captioning quality vs JoyCaption is unverified. |
+| `huihui_ai/dolphin3-abliterated:8b` | 4.92 GB | fits | Lightweight; leaves room for a vision model alongside. |
+| `huihui_ai/qwen3-abliterated:30b-a3b-instruct-2507-q4_K_M` | 18.56 GB | **does not fit** | Previously listed here as "may work" — measured at 18.56 GB, so it spills to system RAM on a 16 GB card. |
+
+> **On thinking models:** the default is a Qwen3 reasoning model driven with `/no_think`, which suppresses the `<think>` block imperfectly — stray `</think>` and `\boxed{}` fragments do reach the output, and the prompt pipeline strips them. A natively non-thinking instruct model removes that failure mode rather than cleaning up after it.
+
+### Measured: qwen3-14b vs mistral-small-24b
+
+Both models on the same caption, timeline style, 5 seconds, two runs each:
+
+| | qwen3-14b (default) | mistral-small-24b |
+|---|---|---|
+| Beat completeness | 5/5 both runs | 5/5 both runs |
+| Reasoning leaked into raw output | **both runs** (`</think>`, `boxed`) | **none** |
+| Speed, model warm | **1.8 s** | 8.9 s |
+| Speed, cold load | 13 s | 46 s |
+| Prompt-rule violations | none | one run used a banned word ("continues") |
+
+Their MMAudio prompts differed in a way worth knowing about. From a caption describing a *bedroom with a window and natural light*:
+
+- qwen3: `distant city sounds, subtle heartbeat, gentle hum of a ceiling fan, soft click of a curtain swaying`
+- mistral: `soft breeze through window, distant birds chirping`
+
+qwen3 invented a ceiling fan and city noise the scene never mentioned; MMAudio will render those faithfully. Mistral stayed with what the description supports.
+
+**Neither wins outright.** Batch work favours qwen3 — the ~5× speed gap compounds over a folder, and the pipeline strips its leaks reliably. Single images where quality matters favour mistral: cleaner output and better-grounded audio. The stage-2 model is a dropdown, so this is a per-run choice rather than a setting to commit to.
 
 ---
 
@@ -255,6 +435,7 @@ GitHub Releases: push a tag like `v1.0.0` and the CI workflow publishes the exe 
 Notes:
 - First run still downloads model files to the user's cache
 - Windows Defender/SmartScreen warnings are normal for unsigned builds
+- The build bundles `TERMS.md`, `THIRD_PARTY_NOTICES.txt` and `LICENSE`. After changing `requirements.txt`, regenerate the notices with `python scripts/generate_third_party_notices.py`
 
 ---
 
@@ -379,6 +560,15 @@ If you find Img-Tagbooru useful, consider supporting development:
 Your support helps keep this project free, open-source, and actively maintained.
 
 ---
+
+## Legal, privacy and attribution
+
+- **License:** MIT — see [LICENSE](LICENSE). Bundled third-party components and their licences are listed in [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt); Qt is used through PySide6 under the LGPL-3.0.
+- **Terms of use:** [TERMS.md](TERMS.md). The app is for adults (18+) and asks you to confirm that and accept the terms on first launch. Adult output is not filtered — it depends on the modes you pick and the models you install, and complying with local law is your responsibility.
+- **The one hard rule:** the app never emits minor age-descriptor tags (`loli`, `shota`, `child`, …) in any mode that can produce suggestive output, and every explicit prompt states that all subjects are adults. This is enforced in the app's own code ([backend/content_policy.py](backend/content_policy.py)), not left to the model. Sexual content involving minors, drawn or otherwise, is a criminal offence in the EU, the US and Poland, and using this tool for it is prohibited.
+- **Privacy:** no telemetry, no accounts, no uploads. The only network access is model downloads from Hugging Face, the GitHub update check in `update.bat`, Ollama on localhost, and any image URL you paste yourself. Settings and models live under `~/.img_tagger`.
+- **Models:** WD tagger models by [SmilingWolf](https://huggingface.co/SmilingWolf) (Apache 2.0), downloaded on request. Language and vision models are pulled by you through Ollama under their own licences — JoyCaption is Llama 3.1-based (Meta Llama 3.1 Community License), Qwen and Mistral derivatives are Apache 2.0. Read the licence of anything you install.
+- **Data:** `danbooru_tags_post_count.csv` contains tag names and post counts from [Danbooru](https://danbooru.donmai.us/), whose terms describe tags as factual, non-copyrightable information. No images are included.
 
 ## License
 

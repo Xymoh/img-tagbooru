@@ -8,11 +8,15 @@ import sys
 import tempfile
 import urllib.request
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Callable, Iterable, Sequence
 from urllib.parse import urljoin
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
+
+# Single source of truth for the version shown in the title bar, the About
+# dialog, the splash screen and QApplication metadata.
+APP_VERSION = "1.3.7"
 
 import pandas as pd
 from PIL import Image, UnidentifiedImageError
@@ -23,7 +27,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from backend.description_tagger import DescriptionTagResult, get_description_tagger
+from backend.description_tagger import (
+    DescriptionTagResult,
+    NaturalPromptResult,
+    get_description_tagger,
+)
 from backend import tagger as tagger_backend
 from backend.tagger import category_label, get_tagger, predict_tags
 from backend.tag_utils import (
@@ -41,12 +49,37 @@ from backend.tag_utils import (
 
 from frontend.native.completer import CaptionCompleterMixin
 from frontend.native.styles import build_stylesheet
-from frontend.native.widgets import HelpDialog
+from frontend.native.widgets import (
+    HelpDialog,
+    TermsDialog,
+    TextViewerDialog,
+    TERMS_VERSION,
+    read_bundled_text,
+)
 from frontend.native.workers import (
     DescriptionTagWorker,
     ImageLoadWorker,
     ModelOperationWorker,
     TaggerModelWorker,
+    VLMCaptionWorker,
+)
+from backend.vlm_captioner import (
+    CAPTION_LENGTHS,
+    CAPTION_STYLES,
+    DEFAULT_LENGTH,
+    DEFAULT_STYLE,
+    EXPLICIT_EXTRAS,
+    EXTRA_OPTIONS,
+    VLMCaptioner,
+    list_vlm_models,
+)
+from backend.video_prompter import (
+    DEFAULT_DURATION,
+    MAX_DURATION,
+    MIN_DURATION,
+    RELIABLE_DURATION,
+    VIDEO_STYLES,
+    VideoPrompter,
 )
 
 
@@ -55,14 +88,25 @@ from frontend.native.workers import (
 # ---------------------------------------------------------------------------
 
 class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
-    def __init__(self) -> None:
+    def __init__(self, progress_cb: "Callable[[str], None] | None" = None) -> None:
         super().__init__()
-        self.setWindowTitle("Img-Tagbooru v1.3.4")
+        # Reports construction phases to the splash screen. Defaults to a no-op
+        # so the window can still be built headlessly (tests, embedding).
+        self._boot = progress_cb or (lambda _message: None)
+        self._boot("Building interface…")
+        self.setWindowTitle(f"Img-Tagbooru v{APP_VERSION}")
         self.resize(1500, 960)
         self.setMinimumSize(1200, 720)
         self.setAcceptDrops(True)
 
         self.pending_paths: list[Path] = []
+        # Vision captioning runs on a QThread that can outlive its dialog, so
+        # the reference is held here rather than in the dialog's local scope.
+        self._vlm_worker: VLMCaptionWorker | None = None
+        # Settings for the image/video prompt dialog. Held on the window so
+        # they survive closing and reopening the dialog, and nowhere more
+        # durable than that — a fresh app launch starts from the defaults.
+        self._vlm_dialog_state: dict[str, object] = {}
         self.results: list[TaggingResult] = []
         self._single_results: dict[int, TaggingResult] = {}
         self._active_result_index = -1
@@ -515,26 +559,35 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         )
         caption_layout.addWidget(self.caption_edit)
 
-        self.apply_caption_btn = QtWidgets.QPushButton("🔄 Apply Caption")
+        self.apply_caption_btn = QtWidgets.QPushButton("🔄 Apply")
         self.apply_caption_btn.setToolTip("Update table from edited caption text")
         self.apply_caption_btn.clicked.connect(self.apply_caption_text)
-        self.copy_prompt_btn = QtWidgets.QPushButton("📋 Copy as Prompt")
+        self.copy_prompt_btn = QtWidgets.QPushButton("📋 Copy Prompt")
         self.copy_prompt_btn.setObjectName("copyPromptBtn")
         self.copy_prompt_btn.setToolTip(
             "Copy current caption as a ComfyUI-compatible prompt string\n"
             "(underscores → spaces). Paste directly into ComfyUI."
         )
         self.copy_prompt_btn.clicked.connect(self._copy_as_prompt)
-        self.neg_prompt_btn = QtWidgets.QPushButton("🚫 Build Negative")
+        self.neg_prompt_btn = QtWidgets.QPushButton("🚫 Negative")
         self.neg_prompt_btn.setObjectName("negPromptBtn")
         self.neg_prompt_btn.setToolTip(
             "Build a Negative prompt from excluded/blacklisted tags"
         )
         self.neg_prompt_btn.clicked.connect(self._build_negative_prompt)
-        self.export_btn = QtWidgets.QPushButton("💾 Save Current")
+        self.vlm_prompt_btn = QtWidgets.QPushButton("📝 Image → Prompt")
+        self.vlm_prompt_btn.setObjectName("vlmPromptBtn")
+        self.vlm_prompt_btn.setToolTip(
+            "Describe the image itself with a vision model, in natural language,\n"
+            "for Krea / Flux-style prompts.\n\n"
+            "This bypasses the ONNX tagger entirely — useful for photographs,\n"
+            "which the Danbooru-trained taggers handle poorly."
+        )
+        self.vlm_prompt_btn.clicked.connect(self._show_image_prompt_dialog)
+        self.export_btn = QtWidgets.QPushButton("💾 Save")
         self.export_btn.setToolTip("Save caption for selected image as .txt file")
         self.export_btn.clicked.connect(self.export_caption)
-        self.export_beside_btn = QtWidgets.QPushButton("💾 Save Beside Source")
+        self.export_beside_btn = QtWidgets.QPushButton("💾 Save Beside")
         self.export_beside_btn.setToolTip(
             "Save all captions as .txt files next to their source images"
         )
@@ -546,71 +599,69 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         self.tag_freq_btn.setObjectName("tagFreqBtn")
         self.tag_freq_btn.setToolTip("View tag frequency across all loaded results")
         self.tag_freq_btn.clicked.connect(self._show_tag_frequency)
-        # Single-row caption toolbar with logical groups and separators
-        toolbar_row = QtWidgets.QHBoxLayout()
-        toolbar_row.setSpacing(0)
+        # Two-row caption toolbar. Eight buttons need ~1230px of natural
+        # width; the caption pane is ~940px at the default window size, so a
+        # single row could only fit by eliding labels ("Save Beside Sour").
+        # Row 1 is caption/prompt actions, row 2 is save/export/analysis.
+        def _separator() -> QtWidgets.QFrame:
+            line = QtWidgets.QFrame()
+            line.setFrameShape(QtWidgets.QFrame.VLine)
+            line.setFrameShadow(QtWidgets.QFrame.Sunken)
+            line.setStyleSheet("color: #444;")
+            line.setFixedWidth(2)
+            return line
 
-        # --- Group 1: Caption editing ---
-        toolbar_row.addWidget(self.apply_caption_btn)
+        toolbar_rows = QtWidgets.QVBoxLayout()
+        toolbar_rows.setSpacing(4)
 
-        # separator
-        sep1 = QtWidgets.QFrame()
-        sep1.setFrameShape(QtWidgets.QFrame.VLine)
-        sep1.setFrameShadow(QtWidgets.QFrame.Sunken)
-        sep1.setStyleSheet("color: #444;")
-        sep1.setFixedWidth(2)
-        toolbar_row.addSpacing(8)
-        toolbar_row.addWidget(sep1)
-        toolbar_row.addSpacing(8)
+        # --- Row 1: caption editing and prompt building ---
+        row1 = QtWidgets.QHBoxLayout()
+        row1.setSpacing(0)
+        row1.addWidget(self.apply_caption_btn)
+        row1.addSpacing(8)
+        row1.addWidget(_separator())
+        row1.addSpacing(8)
+        row1.addWidget(self.copy_prompt_btn)
+        row1.addSpacing(4)
+        row1.addWidget(self.neg_prompt_btn)
+        row1.addSpacing(4)
+        row1.addWidget(self.vlm_prompt_btn)
+        row1.addStretch(1)
+        toolbar_rows.addLayout(row1)
 
-        # --- Group 2: Prompt-related ---
-        toolbar_row.addWidget(self.copy_prompt_btn)
-        toolbar_row.addSpacing(4)
-        toolbar_row.addWidget(self.neg_prompt_btn)
+        # --- Row 2: saving, export and analysis ---
+        row2 = QtWidgets.QHBoxLayout()
+        row2.setSpacing(0)
+        row2.addWidget(self.export_btn)
+        row2.addSpacing(4)
+        row2.addWidget(self.export_beside_btn)
+        row2.addSpacing(4)
+        row2.addWidget(self.export_zip_btn)
+        row2.addSpacing(8)
+        row2.addWidget(_separator())
+        row2.addSpacing(8)
+        row2.addWidget(self.tag_freq_btn)
+        row2.addStretch(1)
+        toolbar_rows.addLayout(row2)
 
-        # separator
-        sep2 = QtWidgets.QFrame()
-        sep2.setFrameShape(QtWidgets.QFrame.VLine)
-        sep2.setFrameShadow(QtWidgets.QFrame.Sunken)
-        sep2.setStyleSheet("color: #444;")
-        sep2.setFixedWidth(2)
-        toolbar_row.addSpacing(8)
-        toolbar_row.addWidget(sep2)
-        toolbar_row.addSpacing(8)
+        # Qt elides a button's label when the layout squeezes it below its
+        # size hint, which is how "Save Beside Source" became "Save Beside
+        # Sour". Pinning each button to its natural width makes that
+        # impossible.
+        #
+        # Deferred to the first event-loop turn on purpose: a button's size
+        # hint is not final during construction — neither at creation nor
+        # after ensurePolished() — and reading it early under-sizes the
+        # minimum by a few pixels, which is exactly enough to clip a trailing
+        # character.
+        self._toolbar_buttons = (
+            self.apply_caption_btn, self.copy_prompt_btn, self.neg_prompt_btn,
+            self.vlm_prompt_btn, self.export_btn, self.export_beside_btn,
+            self.export_zip_btn, self.tag_freq_btn,
+        )
+        QtCore.QTimer.singleShot(0, self._pin_toolbar_button_widths)
 
-        # --- Group 3: Single-image save ---
-        toolbar_row.addWidget(self.export_btn)
-
-        # separator
-        sep3 = QtWidgets.QFrame()
-        sep3.setFrameShape(QtWidgets.QFrame.VLine)
-        sep3.setFrameShadow(QtWidgets.QFrame.Sunken)
-        sep3.setStyleSheet("color: #444;")
-        sep3.setFixedWidth(2)
-        toolbar_row.addSpacing(8)
-        toolbar_row.addWidget(sep3)
-        toolbar_row.addSpacing(8)
-
-        # --- Group 4: Batch export ---
-        toolbar_row.addWidget(self.export_beside_btn)
-        toolbar_row.addSpacing(4)
-        toolbar_row.addWidget(self.export_zip_btn)
-
-        # separator
-        sep4 = QtWidgets.QFrame()
-        sep4.setFrameShape(QtWidgets.QFrame.VLine)
-        sep4.setFrameShadow(QtWidgets.QFrame.Sunken)
-        sep4.setStyleSheet("color: #444;")
-        sep4.setFixedWidth(2)
-        toolbar_row.addSpacing(8)
-        toolbar_row.addWidget(sep4)
-        toolbar_row.addSpacing(8)
-
-        # --- Group 5: Analysis ---
-        toolbar_row.addWidget(self.tag_freq_btn)
-        toolbar_row.addStretch(1)
-
-        caption_layout.addLayout(toolbar_row)
+        caption_layout.addLayout(toolbar_rows)
         right_splitter.addWidget(caption_group)
         right_splitter.setStretchFactor(0, 2)  # settings
         right_splitter.setStretchFactor(1, 4)  # tags table
@@ -624,6 +675,7 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         self.caption_postfix.textChanged.connect(self._update_affix_preview)
         self.initial_caption.textChanged.connect(self._update_affix_preview)
 
+        self._boot("Loading tag vocabulary…")
         self.tabs.addTab(batch_tab, "Batch Tagger")
 
         # ===== TAB 2: Description Tagger =====
@@ -657,28 +709,56 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         # below continue to target the left config column.
         desc_layout = desc_left_layout
 
-        # --- Input mode toggle (description vs seed tags) — shown first ---
-        input_mode_group = QtWidgets.QGroupBox("📥 Input Mode")
-        input_mode_layout = QtWidgets.QHBoxLayout(input_mode_group)
+        # --- Input mode + output format — shown first ---
+        # Packed as one two-column row so the config column stays short enough
+        # for a 1080p screen.
+        input_mode_group = QtWidgets.QGroupBox("📥 Input & Output")
+        input_mode_layout = QtWidgets.QGridLayout(input_mode_group)
         input_mode_layout.setSpacing(6)
+        input_mode_layout.setColumnStretch(0, 1)
+        input_mode_layout.setColumnStretch(1, 1)
+
+        combo_css = "background-color: #1a1a1a; color: #ffffff; padding: 5px;"
+        field_label_css = "color: #4da6ff; font-size: 10px; font-weight: bold;"
+
+        input_label = QtWidgets.QLabel("Input:")
+        input_label.setStyleSheet(field_label_css)
+        input_mode_layout.addWidget(input_label, 0, 0)
+
+        output_label = QtWidgets.QLabel("Output format:")
+        output_label.setStyleSheet(field_label_css)
+        input_mode_layout.addWidget(output_label, 0, 1)
 
         self.desc_input_mode = QtWidgets.QComboBox()
-        self.desc_input_mode.setStyleSheet(
-            "background-color: #1a1a1a; color: #ffffff; padding: 5px;"
-        )
+        self.desc_input_mode.setStyleSheet(combo_css)
         self.desc_input_mode.addItem("📝 From Description", "description")
         self.desc_input_mode.addItem("🏷️ From Seed Tags", "seed_tags")
         self.desc_input_mode.setCurrentIndex(0)
         self.desc_input_mode.currentIndexChanged.connect(self._on_input_mode_changed)
-        input_mode_layout.addWidget(self.desc_input_mode)
+        input_mode_layout.addWidget(self.desc_input_mode, 1, 0)
 
-        input_mode_hint = QtWidgets.QLabel(
-            "<b>Description:</b> write a scene in English → AI generates tags<br>"
-            "<b>Seed Tags:</b> paste existing tags → AI adds complementary tags"
+        self.desc_output_format = QtWidgets.QComboBox()
+        self.desc_output_format.setStyleSheet(combo_css)
+        self.desc_output_format.addItem("🏷️ Danbooru Tags", "tags")
+        self.desc_output_format.addItem("📝 Natural Language", "natural")
+        self.desc_output_format.setCurrentIndex(0)
+        self.desc_output_format.setToolTip(
+            "Danbooru Tags: comma-separated tags for SDXL-anime models\n"
+            "(Illustrious, NoobAI, Pony) via ComfyUI/A1111.\n\n"
+            "Natural Language: a flowing prose paragraph for models that read\n"
+            "plain English (Krea, Flux and similar). Runs in two stages —\n"
+            "tags are generated first, then rewritten as prose, so the prompt\n"
+            "inherits all the detail the tag pipeline adds."
         )
-        input_mode_hint.setStyleSheet("color: #9ecbff; font-size: 10px; padding: 2px;")
-        input_mode_hint.setWordWrap(True)
-        input_mode_layout.addWidget(input_mode_hint, 1)
+        self.desc_output_format.currentIndexChanged.connect(
+            self._on_output_format_changed
+        )
+        input_mode_layout.addWidget(self.desc_output_format, 1, 1)
+
+        self.desc_io_hint = QtWidgets.QLabel()
+        self.desc_io_hint.setStyleSheet("color: #9ecbff; font-size: 10px; padding: 2px;")
+        self.desc_io_hint.setWordWrap(True)
+        input_mode_layout.addWidget(self.desc_io_hint, 2, 0, 1, 2)
         desc_layout.addWidget(input_mode_group)
 
         model_group = QtWidgets.QGroupBox("🤖 LLM Model Selection")
@@ -695,6 +775,7 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         )
         self.model_selector.addItem("(Loading models...)", None)
         model_layout.addWidget(self.model_selector)
+        self._boot("Checking for local models…")
         self._refresh_available_models()
 
         # --- Model management buttons ---
@@ -820,10 +901,15 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         desc_right_splitter.addWidget(self.input_desc_group)
 
         tags_group = QtWidgets.QGroupBox("🏷️ Generated Tags")
+        self.desc_output_group = tags_group
         tags_layout = QtWidgets.QVBoxLayout(tags_group)
 
         self.desc_tags_display = QtWidgets.QPlainTextEdit()
         self.desc_tags_display.setReadOnly(True)
+        # Keep Ctrl+A / Shift+arrow selection working on this read-only view.
+        self.desc_tags_display.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard
+        )
         self.desc_tags_display.setPlaceholderText(
             "Generated Danbooru tags will appear here after processing..."
         )
@@ -834,6 +920,9 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         self.desc_tags_display.setMinimumHeight(80)
         tags_layout.addWidget(self.desc_tags_display, 1)
 
+        copy_row = QtWidgets.QHBoxLayout()
+        copy_row.setSpacing(4)
+
         copy_tags_btn = QtWidgets.QPushButton("📋 Copy Tags to Clipboard")
         copy_tags_btn.setToolTip("Copy generated tags as comma-separated list")
         copy_tags_btn.setStyleSheet(
@@ -842,12 +931,32 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         )
         copy_tags_btn.clicked.connect(self._copy_description_tags)
         self._copy_tags_btn = copy_tags_btn
-        tags_layout.addWidget(copy_tags_btn)
+        copy_row.addWidget(copy_tags_btn, 2)
+
+        # Only meaningful in natural-language mode, where the run also produces
+        # an intermediate tag set worth keeping.
+        self._copy_source_tags_btn = QtWidgets.QPushButton("🏷️ Copy Source Tags")
+        self._copy_source_tags_btn.setToolTip(
+            "Copy the Danbooru tags the prompt was written from"
+        )
+        self._copy_source_tags_btn.setStyleSheet(
+            "background-color: #444; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 6px;"
+        )
+        self._copy_source_tags_btn.clicked.connect(self._copy_prompt_source_tags)
+        self._copy_source_tags_btn.setVisible(False)
+        copy_row.addWidget(self._copy_source_tags_btn, 1)
+
+        tags_layout.addLayout(copy_row)
 
         desc_right_splitter.addWidget(tags_group)
         desc_right_splitter.setStretchFactor(0, 3)  # input
         desc_right_splitter.setStretchFactor(1, 2)  # generated tags
 
+        # Sync every input/output-dependent label now that the whole tab exists.
+        self._refresh_desc_io_labels()
+
+        self._boot("Finishing up…")
         self.tabs.addTab(desc_tab, "Description Tagger")
 
         # --- Status bar --------------------------------------------------------
@@ -872,6 +981,13 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         """)
         self.help_btn.clicked.connect(self.show_help)
         self.statusbar.addPermanentWidget(self.help_btn)
+
+        self.about_btn = QtWidgets.QPushButton("ℹ️ About")
+        self.about_btn.setMaximumHeight(25)
+        self.about_btn.setToolTip("Version, licence, terms of use and third-party notices")
+        self.about_btn.setStyleSheet(self.help_btn.styleSheet())
+        self.about_btn.clicked.connect(self.show_about)
+        self.statusbar.addPermanentWidget(self.about_btn)
 
         self.kofi_btn = QtWidgets.QPushButton("☕ Support")
         self.kofi_btn.setMaximumHeight(25)
@@ -1003,22 +1119,51 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         QDesktopServices.openUrl(QUrl("https://ko-fi.com/saekimon"))
 
     def show_about(self) -> None:
-        QtWidgets.QMessageBox.about(
-            self,
-            "About Img-Tagbooru",
-            "Img-Tagbooru v1.3.4\n\n"
-            "Local Anime Image Tagger\n"
-            "WD14-style tagging for anime images and LoRA training.\n\n"
-            "Features:\n"
-            "• Local image tagging with switchable WD ONNX models\n"
-            "• Batch processing with drag & drop\n"
-            "• Description-to-tags with local Ollama LLM\n"
-            "• Tag enrichment from seed tags\n"
-            "• Export captions for LoRA training datasets\n\n"
-            "Built with Python, PySide6, and ONNX Runtime.\n\n"
-            "☕ https://ko-fi.com/saekimon\n"
-            "🐙 https://github.com/Xymoh/img-tagbooru",
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("About Img-Tagbooru")
+        box.setIcon(QtWidgets.QMessageBox.Information)
+        box.setTextFormat(QtCore.Qt.RichText)
+        box.setText(
+            f"<b>Img-Tagbooru v{APP_VERSION}</b><br>"
+            "Local Danbooru-style image tagger for anime images and LoRA training.<br><br>"
+            "© 2026 Szymon Ruszkiewicz — released under the <b>MIT License</b>.<br>"
+            "Provided \"as is\", without warranty of any kind.<br><br>"
+            "<b>Privacy:</b> no telemetry, no accounts, no uploads. Everything runs on "
+            "this computer; the only network access is model downloads from "
+            "Hugging Face, the GitHub update check, and any image URL you paste.<br><br>"
+            "<b>Models:</b> WD taggers by SmilingWolf (Apache 2.0). Language and "
+            "vision models are installed by you through Ollama under their own "
+            "licences. Tag vocabulary: Danbooru (factual tag data).<br><br>"
+            "Built with Python, PySide6 / Qt (LGPL-3.0) and ONNX Runtime.<br><br>"
+            "☕ <a href='https://ko-fi.com/saekimon'>ko-fi.com/saekimon</a> &nbsp; "
+            "🐙 <a href='https://github.com/Xymoh/img-tagboru-ai'>github.com/Xymoh/img-tagboru-ai</a>"
         )
+        terms_btn = box.addButton("Terms of Use", QtWidgets.QMessageBox.ActionRole)
+        notices_btn = box.addButton("Third-party notices", QtWidgets.QMessageBox.ActionRole)
+        license_btn = box.addButton("MIT License", QtWidgets.QMessageBox.ActionRole)
+        box.addButton(QtWidgets.QMessageBox.Close)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is terms_btn:
+            TextViewerDialog(
+                "Terms of Use — Img-Tagbooru",
+                read_bundled_text("TERMS.md", "TERMS.md not found. See the GitHub repository."),
+                self,
+            ).exec()
+        elif clicked is notices_btn:
+            TextViewerDialog(
+                "Third-party notices — Img-Tagbooru",
+                read_bundled_text("THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES.txt not found."),
+                self,
+                markdown=False,
+            ).exec()
+        elif clicked is license_btn:
+            TextViewerDialog(
+                "MIT License — Img-Tagbooru",
+                read_bundled_text("LICENSE", "LICENSE not found."),
+                self,
+                markdown=False,
+            ).exec()
 
     # ==================================================================
     # UI helpers
@@ -2201,29 +2346,45 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         except Exception:
             pass  # Tagger not initialized yet — fine
 
+    # Output-panel styling per format. Tags want a dense monospace list; prose
+    # is a paragraph and reads better in the UI font at a comfortable size.
+    _TAGS_DISPLAY_CSS = (
+        "background-color: #0d0d0d; color: #66ff66; font-family: monospace; "
+        "font-size: 11px; border-radius: 5px; padding: 8px;"
+    )
+    _PROSE_DISPLAY_CSS = (
+        "background-color: #0d0d0d; color: #d6e9ff; font-size: 12px; "
+        "border-radius: 5px; padding: 8px;"
+    )
+
     def _on_input_mode_changed(self) -> None:
-        """Update UI labels and placeholders when the description/seed-tags mode changes."""
-        mode = self.desc_input_mode.currentData()
-        if mode == "seed_tags":
+        """Refresh labels when the description/seed-tags input mode changes."""
+        self._refresh_desc_io_labels()
+
+    def _on_output_format_changed(self) -> None:
+        """Refresh labels when the tags/natural-language output format changes."""
+        self._refresh_desc_io_labels()
+
+    def _refresh_desc_io_labels(self) -> None:
+        """Sync every Description-tab label to the current input/output pair.
+
+        Input mode and output format are independent, so all four combinations
+        are valid: description or seed tags in, Danbooru tags or prose out.
+        """
+        seed_mode = self.desc_input_mode.currentData() == "seed_tags"
+        natural = self.desc_output_format.currentData() == "natural"
+
+        # --- input side ---
+        if seed_mode:
             self.input_desc_group.setTitle("🏷️ Seed Tags Input")
-            self.desc_hint_label.setText(
-                "Paste Danbooru tags and AI will add complementary tags:"
-            )
             self.description_input.setPlaceholderText(
                 "Examples:\n"
                 "• 1girl, beach, volleyball\n"
                 "• 1girl, witch_hat, forest\n"
                 "• 1girl, 1boy, bedroom"
             )
-            self.generate_from_desc_btn.setText("✨ Enrich Seed Tags")
-            self.generate_from_desc_btn.setToolTip(
-                "AI will analyze your seed tags and generate complementary Danbooru tags"
-            )
         else:
             self.input_desc_group.setTitle("✍️ Description Input")
-            self.desc_hint_label.setText(
-                "Describe what you want to see, and AI will generate Danbooru tags:"
-            )
             self.description_input.setPlaceholderText(
                 "Examples:\n"
                 "• A girl with long black hair and red eyes, wearing a maid outfit\n"
@@ -2231,10 +2392,73 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
                 "• Beautiful landscape with mountains and sunset in fantasy art style\n"
                 "• Character with animal ears, tail, and wearing school uniform"
             )
+
+        if natural:
+            source = "seed tags" if seed_mode else "description"
+            self.desc_hint_label.setText(
+                f"Write a {source}, and AI will produce a natural-language prompt:"
+            )
+            self.generate_from_desc_btn.setText(
+                "✨ Write Prompt from Seed Tags" if seed_mode
+                else "✨ Generate Prompt from Description"
+            )
+            self.generate_from_desc_btn.setToolTip(
+                "Two-stage: AI builds a Danbooru tag set first, then rewrites it "
+                "as a flowing prose prompt for Krea/Flux-style models"
+            )
+        elif seed_mode:
+            self.desc_hint_label.setText(
+                "Paste Danbooru tags and AI will add complementary tags:"
+            )
+            self.generate_from_desc_btn.setText("✨ Enrich Seed Tags")
+            self.generate_from_desc_btn.setToolTip(
+                "AI will analyze your seed tags and generate complementary Danbooru tags"
+            )
+        else:
+            self.desc_hint_label.setText(
+                "Describe what you want to see, and AI will generate Danbooru tags:"
+            )
             self.generate_from_desc_btn.setText("✨ Generate Tags from Description")
             self.generate_from_desc_btn.setToolTip(
                 "AI will analyze your description and generate matching Danbooru tags"
             )
+
+        # --- combined input/output hint ---
+        input_line = (
+            "<b>Seed Tags:</b> paste existing tags → AI expands them"
+            if seed_mode
+            else "<b>Description:</b> write a scene in English"
+        )
+        output_line = (
+            "<b>Natural Language:</b> prose paragraph for Krea / Flux "
+            "(two-stage, slower)"
+            if natural
+            else "<b>Danbooru Tags:</b> comma-separated, for SDXL-anime models"
+        )
+        self.desc_io_hint.setText(f"{input_line}<br>{output_line}")
+
+        # --- output side ---
+        if natural:
+            self.desc_output_group.setTitle("📝 Natural-Language Prompt")
+            self.desc_tags_display.setStyleSheet(self._PROSE_DISPLAY_CSS)
+            self.desc_tags_display.setPlaceholderText(
+                "The generated prompt will appear here after processing..."
+            )
+            self._copy_tags_btn.setText("📋 Copy Prompt to Clipboard")
+            self._copy_tags_btn.setToolTip("Copy the natural-language prompt")
+        else:
+            self.desc_output_group.setTitle("🏷️ Generated Tags")
+            self.desc_tags_display.setStyleSheet(self._TAGS_DISPLAY_CSS)
+            self.desc_tags_display.setPlaceholderText(
+                "Generated Danbooru tags will appear here after processing..."
+            )
+            self._copy_tags_btn.setText("📋 Copy Tags to Clipboard")
+            self._copy_tags_btn.setToolTip("Copy generated tags as comma-separated list")
+
+        # The source-tag button only has something to copy after a prose run.
+        self._copy_source_tags_btn.setVisible(
+            natural and bool(getattr(self, "_last_prompt_source_tags", None))
+        )
 
     def _generate_tags_from_description(self) -> None:
         description = self.description_input.toPlainText().strip()
@@ -2254,8 +2478,18 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         self._last_creativity_mode = selected_creativity
 
         enrich_mode = self.desc_input_mode.currentData() == "seed_tags"
+        output_format = self.desc_output_format.currentData() or "tags"
+        natural = output_format == "natural"
 
-        if enrich_mode:
+        if natural:
+            tips = [
+                "💡 Tip: This runs two passes — tags first, then prose. Give it a moment",
+                "💡 Tip: Natural-language models read plain English — no weights, no tag spam",
+                "💡 Tip: The source tags are kept too; copy them with the second button",
+                "💡 Tip: Creative mode gives the prose more material to work with",
+                "💡 Tip: Re-run for a different phrasing of the same scene",
+            ]
+        elif enrich_mode:
             tips = [
                 "💡 Tip: Add more seed tags for richer expansion results",
                 "💡 Tip: Try different creativity modes for varied complementary tags",
@@ -2274,28 +2508,46 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         tip = random.choice(tips)
 
         self.generate_from_desc_btn.setEnabled(False)
-        action_label = "Enriching" if enrich_mode else "Generating"
+        self._copy_source_tags_btn.setVisible(False)
+        self._last_prompt_source_tags = []
+
+        if natural:
+            action_label = "Generating"
+            target_label = "natural-language prompt"
+        else:
+            action_label = "Enriching" if enrich_mode else "Generating"
+            target_label = "tags"
+
         self.desc_tags_display.setPlainText(
-            f"⏳ {action_label} tags... (this may take a while)\n\n"
+            f"⏳ {action_label} {target_label}... (this may take a while)\n\n"
             f"Mode: {selected_creativity.capitalize()}\n"
             f"{tip}"
         )
         self.statusbar.showMessage(
-            f"Connecting to Ollama and {action_label.lower()} tags in {selected_creativity} mode..."
+            f"Connecting to Ollama and {action_label.lower()} {target_label} "
+            f"in {selected_creativity} mode..."
         )
 
         threshold = self.post_count_threshold.value()
         self._tag_worker = DescriptionTagWorker(
             description, selected_model, selected_creativity, threshold,
             enrich_mode=enrich_mode,
+            output_format=output_format,
         )
         self._tag_worker.finished.connect(self._on_tags_generated)
+        self._tag_worker.prompt_finished.connect(self._on_prompt_generated)
+        self._tag_worker.stage.connect(self._on_generation_stage)
         self._tag_worker.error.connect(self._on_tag_generation_error)
         # Use Qt's own thread-finished signal (fires after the OS thread exits)
         # to schedule cleanup — never destroy a QThread while it's still running.
         self._tag_worker.finished.connect(self._tag_worker.quit)
+        self._tag_worker.prompt_finished.connect(self._tag_worker.quit)
         self._tag_worker.error.connect(self._tag_worker.quit)
         self._tag_worker.start()
+
+    def _on_generation_stage(self, label: str) -> None:
+        """Surface multi-stage progress from the worker in the status bar."""
+        self.statusbar.showMessage(label)
 
     def _on_tags_generated(self, result: DescriptionTagResult) -> None:
         self._last_description_tags = result.tags
@@ -2331,23 +2583,88 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
             self._tag_worker.wait()
             self._tag_worker = None
 
+    def _on_prompt_generated(self, result: NaturalPromptResult) -> None:
+        """Display a finished natural-language prompt and its source tags."""
+        self._last_natural_prompt = result.prompt
+        self._last_prompt_source_tags = list(result.tags)
+        # Keep the tag list available too — a prose run produces both.
+        self._last_description_tags = list(result.tags)
+
+        if not result.prompt:
+            self.desc_tags_display.setPlainText(
+                "⚠️ No prompt generated\n\n"
+                "The AI produced tags but couldn't turn them into prose. Try:\n"
+                "  1. Re-running — temperature variance often fixes it\n"
+                "  2. A different model (a non-thinking instruct model works best)\n"
+                "  3. Switching output format to Danbooru Tags to check stage 1"
+            )
+            self._copy_tags_btn.setEnabled(False)
+            self._copy_source_tags_btn.setVisible(False)
+            self.statusbar.showMessage("Prompt generation produced no prose.", 5000)
+            self.generate_from_desc_btn.setEnabled(True)
+            if self._tag_worker is not None:
+                self._tag_worker.wait()
+                self._tag_worker = None
+            return
+
+        self.desc_tags_display.setPlainText(
+            f"✓ Generated prompt ({result.word_count} words) "
+            f"[{self._last_creativity_mode.capitalize()} mode]:\n\n{result.prompt}\n\n"
+            f"— written from {len(result.tags)} source tags —"
+        )
+        self._copy_tags_btn.setEnabled(True)
+        self._copy_source_tags_btn.setVisible(True)
+        self.statusbar.showMessage(
+            f"✓ Generated a {result.word_count}-word prompt from "
+            f"{len(result.tags)} tags. Re-run for a different phrasing.",
+            8000,
+        )
+        self.generate_from_desc_btn.setEnabled(True)
+        if self._tag_worker is not None:
+            self._tag_worker.wait()
+            self._tag_worker = None
+
     def _on_tag_generation_error(self, error_msg: str) -> None:
         self.desc_tags_display.setPlainText(f"⚠️ Error:\n\n{error_msg}")
         self.statusbar.showMessage("Tag generation failed.", 5000)
         self.generate_from_desc_btn.setEnabled(True)
         self._copy_tags_btn.setEnabled(False)
+        self._copy_source_tags_btn.setVisible(False)
         if self._tag_worker is not None:
             self._tag_worker.wait()
             self._tag_worker = None
 
     def _copy_description_tags(self) -> None:
-        if not hasattr(self, '_last_description_tags') or not self._last_description_tags:
+        """Copy the primary output — prose in natural mode, tags otherwise."""
+        if self.desc_output_format.currentData() == "natural":
+            prompt = getattr(self, "_last_natural_prompt", "")
+            if not prompt:
+                self.statusbar.showMessage("No prompt to copy.", 2000)
+                return
+            QtWidgets.QApplication.clipboard().setText(prompt)
+            self.statusbar.showMessage(
+                f"✓ Copied {len(prompt.split())}-word prompt to clipboard", 3000
+            )
+            return
+
+        if not getattr(self, "_last_description_tags", None):
             self.statusbar.showMessage("No tags to copy.", 2000)
             return
         tags_text = ", ".join(self._last_description_tags)
         QtWidgets.QApplication.clipboard().setText(tags_text)
         self.statusbar.showMessage(
             f"✓ Copied {len(self._last_description_tags)} tags to clipboard", 3000
+        )
+
+    def _copy_prompt_source_tags(self) -> None:
+        """Copy the intermediate Danbooru tags a prose prompt was built from."""
+        tags = getattr(self, "_last_prompt_source_tags", None)
+        if not tags:
+            self.statusbar.showMessage("No source tags to copy.", 2000)
+            return
+        QtWidgets.QApplication.clipboard().setText(", ".join(tags))
+        self.statusbar.showMessage(
+            f"✓ Copied {len(tags)} source tags to clipboard", 3000
         )
 
     # ==================================================================
@@ -2977,6 +3294,818 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
         _on_row_changed()
         dlg.exec()
 
+    # ==================================================================
+    # Shutdown
+    # ==================================================================
+
+    def _pin_toolbar_button_widths(self) -> None:
+        """Stop the caption toolbar from eliding button labels.
+
+        Runs once the widgets are laid out and their size hints are final.
+        """
+        for button in getattr(self, "_toolbar_buttons", ()):
+            try:
+                button.setMinimumWidth(button.sizeHint().width())
+            except RuntimeError:
+                pass  # widget already destroyed
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        """Stop background threads before the window (and its widgets) die.
+
+        Qt aborts the process if a QThread is still running when it is
+        destroyed, so every worker is disconnected and joined here.
+        """
+        workers = [
+            getattr(self, name, None)
+            for name in ("_vlm_worker", "_tag_worker", "_image_worker")
+        ]
+        for w in workers:
+            if w is None:
+                continue
+            try:
+                if hasattr(w, "cancel"):
+                    w.cancel()
+                w.disconnect()  # detach every slot before teardown
+            except (RuntimeError, TypeError):
+                pass
+            try:
+                if w.isRunning():
+                    w.quit()
+                    w.wait(5000)
+            except RuntimeError:
+                pass  # already destroyed by Qt
+        super().closeEvent(event)
+
+    # ==================================================================
+    # Image → natural-language prompt (vision model)
+    # ==================================================================
+
+    def _vlm_image_sources(self) -> list[tuple[int, str, object]]:
+        """Collect images available for captioning, newest workflow first.
+
+        Tagged results are preferred when present, but untagged loaded images
+        work too — the vision model does not need tags, and running the ONNX
+        tagger first is pointless for photographs.
+        """
+        sources: list[tuple[int, str, object]] = []
+        if self.results:
+            for i, r in enumerate(self.results):
+                # Prefer the path; pasted/dropped images live only in memory.
+                sources.append((i, r.name, r.path if r.path else r.image))
+        elif self.pending_paths:
+            for i, p in enumerate(self.pending_paths):
+                sources.append((i, p.name, p))
+        return sources
+
+    def _show_image_prompt_dialog(self) -> None:
+        """Caption images directly with a vision model, bypassing the tagger."""
+        sources = self._vlm_image_sources()
+        if not sources:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No images",
+                "Load some images first (drag & drop, Open Images, or paste).\n\n"
+                "You do not need to tag them — the vision model reads the image "
+                "directly.",
+            )
+            return
+
+        dlg = QtWidgets.QDialog(self)
+        dlg.setWindowTitle("📝 Write Prompt from Image")
+        dlg.setMinimumSize(940, 620)
+        layout = QtWidgets.QVBoxLayout(dlg)
+        layout.setSpacing(8)
+
+        intro = QtWidgets.QLabel(
+            "Describes the image itself in natural language for "
+            "<b>Krea / Flux-style</b> models — no Danbooru tags in between. "
+            "Works on photographs, which the ONNX taggers do not."
+        )
+        intro.setStyleSheet("color: #9ecbff; font-size: 11px;")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        # --- Settings row (packed horizontally to stay short on 1080p) ---
+        settings = QtWidgets.QGroupBox("⚙️ Settings")
+        grid = QtWidgets.QGridLayout(settings)
+        grid.setSpacing(6)
+        combo_css = "background-color: #1a1a1a; color: #ffffff; padding: 4px;"
+        lbl_css = "color: #4da6ff; font-size: 10px; font-weight: bold;"
+
+        for col, text in enumerate(("Vision model:", "Caption style:", "Length:")):
+            lab = QtWidgets.QLabel(text)
+            lab.setStyleSheet(lbl_css)
+            grid.addWidget(lab, 0, col)
+            grid.setColumnStretch(col, 1 if col == 0 else 0)
+
+        model_combo = QtWidgets.QComboBox()
+        model_combo.setStyleSheet(combo_css)
+        installed: set[str] = set()
+        detected: list[str] = []
+        try:
+            _cap = VLMCaptioner()
+            installed = set(_cap.list_installed_models())
+            # Anything Ollama reports as vision-capable, so a newer or more
+            # accurate captioner appears without a code change here.
+            detected = _cap.list_vision_models()
+        except Exception:
+            pass
+
+        curated_ids = set()
+        for info in list_vlm_models():
+            curated_ids.add(info.model_id)
+            mark = "✓ installed" if info.model_id in installed else f"~{info.approx_size_gb:.1f} GB"
+            model_combo.addItem(f"{info.name} — {mark}", info.model_id)
+            model_combo.setItemData(
+                model_combo.count() - 1, info.description, QtCore.Qt.ToolTipRole
+            )
+
+        # Other installed vision models the curated list does not know about.
+        for name in detected:
+            if name in curated_ids:
+                continue
+            model_combo.addItem(f"{name} — ✓ installed", name)
+            model_combo.setItemData(
+                model_combo.count() - 1,
+                "Detected on your machine: Ollama reports vision support for "
+                "this model. Quality for captioning is unverified.",
+                QtCore.Qt.ToolTipRole,
+            )
+
+        # Default to an installed model when there is one.
+        for i in range(model_combo.count()):
+            if model_combo.itemData(i) in installed:
+                model_combo.setCurrentIndex(i)
+                break
+        grid.addWidget(model_combo, 1, 0)
+
+        style_combo = QtWidgets.QComboBox()
+        style_combo.setStyleSheet(combo_css)
+        for key, (label, _) in CAPTION_STYLES.items():
+            style_combo.addItem(label, key)
+        style_combo.setCurrentIndex(
+            max(0, list(CAPTION_STYLES).index(DEFAULT_STYLE))
+        )
+        style_combo.setToolTip(
+            "Descriptive styles produce flowing prose — the right shape for\n"
+            "Krea/Flux. 'Stable Diffusion prompt' returns comma-separated\n"
+            "fragments instead."
+        )
+        grid.addWidget(style_combo, 1, 1)
+
+        length_combo = QtWidgets.QComboBox()
+        length_combo.setStyleSheet(combo_css)
+        for key in CAPTION_LENGTHS:
+            length_combo.addItem(key.replace("_", " ").title(), key)
+        length_combo.setCurrentIndex(max(0, list(CAPTION_LENGTHS).index(DEFAULT_LENGTH)))
+        grid.addWidget(length_combo, 1, 2)
+
+        # --- Extra instructions (JoyCaption's own option strings) ---
+        # Packed as two compact rows so the dialog stays usable on 1080p.
+        extra_boxes: dict[str, QtWidgets.QCheckBox] = {}
+        extra_row = QtWidgets.QGridLayout()
+        extra_row.setSpacing(4)
+        pos = 0  # own counter so skipped options don't leave holes in the grid
+        for key, (label, text) in EXTRA_OPTIONS.items():
+            if key in EXPLICIT_EXTRAS:
+                continue  # driven by the Explicit toggle below
+            cb = QtWidgets.QCheckBox(label)
+            if key == "vulgar":
+                cb.setToolTip(
+                    text
+                    + "\n\nNote: tuned for training-caption realism, not prompt "
+                    "quality.\nIn testing it traded descriptive detail for slang "
+                    "(\"natural light\nfrom a window on the right\" became "
+                    "\"lighting's bright\"), and\nprofanity is not a visual "
+                    "descriptor a diffusion model can use."
+                )
+            else:
+                cb.setToolTip(text)
+            cb.setStyleSheet("font-size: 10px;")
+            extra_boxes[key] = cb
+            extra_row.addWidget(cb, pos // 3, pos % 3)
+            pos += 1
+        # Lighting and camera angle are what Krea-style prompts live on.
+        extra_boxes["lighting"].setChecked(True)
+        extra_boxes["camera_angle"].setChecked(True)
+        grid.addLayout(extra_row, 2, 0, 1, 3)
+
+        explicit_cb = QtWidgets.QCheckBox("🔞 Explicit — describe directly, no euphemisms")
+        explicit_cb.setStyleSheet("color: #ff6666; font-weight: bold; font-size: 11px;")
+        explicit_cb.setToolTip(
+            "JoyCaption is uncensored, but a formal register still euphemises —\n"
+            "that is what turns explicit imagery into \"modest cleavage\".\n\n"
+            "Switches to a casual tone and tells the model to describe anatomy\n"
+            "and state of dress bluntly instead of reaching for polite wording.\n\n"
+            "For profanity as well, tick 'Vulgar slang' — but note it trades\n"
+            "descriptive detail for slang, which usually makes a worse prompt."
+        )
+
+        def sync_explicit() -> None:
+            # "Keep it PG" and Explicit are contradictory; never both.
+            pg = extra_boxes.get("keep_pg")
+            if pg is not None and explicit_cb.isChecked():
+                pg.setChecked(False)
+            if pg is not None:
+                pg.setEnabled(not explicit_cb.isChecked())
+
+        explicit_cb.toggled.connect(sync_explicit)
+        if "keep_pg" in extra_boxes:
+            extra_boxes["keep_pg"].toggled.connect(
+                lambda on: explicit_cb.setChecked(False) if on else None
+            )
+        grid.addWidget(explicit_cb, 3, 0, 1, 3)
+
+        def selected_extras() -> list[str]:
+            return [k for k, cb in extra_boxes.items() if cb.isChecked()]
+
+        # --- Output: still-image prompt, or a Wan 2.2 video prompt ---
+        out_row = QtWidgets.QHBoxLayout()
+        out_row.setSpacing(6)
+        out_label = QtWidgets.QLabel("Output:")
+        out_label.setStyleSheet(lbl_css)
+        out_row.addWidget(out_label)
+
+        output_combo = QtWidgets.QComboBox()
+        output_combo.setStyleSheet(combo_css)
+        output_combo.addItem("🖼️ Image prompt (Krea / Flux)", "")
+        for key, label in VIDEO_STYLES.items():
+            output_combo.addItem(f"🎬 {label}", key)
+        output_combo.setToolTip(
+            "Video modes add a second stage: the vision model describes the\n"
+            "first frame, then the text model invents the motion.\n\n"
+            "The vision model is a captioner — asked to plan motion directly it\n"
+            "just restates the still — so this is split across two models."
+        )
+        out_row.addWidget(output_combo, 2)
+
+        duration_label = QtWidgets.QLabel("Seconds:")
+        duration_label.setStyleSheet(lbl_css)
+        out_row.addWidget(duration_label)
+        duration_spin = QtWidgets.QSpinBox()
+        duration_spin.setRange(MIN_DURATION, MAX_DURATION)
+        duration_spin.setValue(DEFAULT_DURATION)
+        duration_spin.setToolTip(
+            "Clip length. One timeline beat per second.\n\n"
+            f"Past about {RELIABLE_DURATION}s the model often drops the last "
+            "beat or two;\nthe result reports how many it actually produced."
+        )
+        out_row.addWidget(duration_spin)
+
+        text_model_combo = QtWidgets.QComboBox()
+        text_model_combo.setStyleSheet(combo_css)
+        text_model_combo.setToolTip(
+            "Stage-2 text model: writes the motion from the first-frame caption.\n\n"
+            "This is a language task, so it needs an instruction-following text\n"
+            "model. Vision captioners (JoyCaption) are excluded — asked for a\n"
+            "timeline they either restate the still or fail outright."
+        )
+        # Curated captioners are the wrong tool here and were the cause of a
+        # silent failure: JoyCaption picked as stage 2 raised on 1 run in 3
+        # and produced caption-restating beats on the other two.
+        captioner_ids = {info.model_id for info in list_vlm_models()}
+        try:
+            from backend.description_tagger import get_description_tagger
+
+            for name in get_description_tagger().list_available_models():
+                if name in captioner_ids:
+                    continue
+                text_model_combo.addItem(name, name)
+        except Exception:
+            pass
+        if text_model_combo.count() == 0:
+            text_model_combo.addItem(VideoPrompter.DEFAULT_MODEL, VideoPrompter.DEFAULT_MODEL)
+        # Prefer the default; otherwise the first remaining entry — never
+        # leave the selection on something that cannot do the job.
+        for i in range(text_model_combo.count()):
+            if text_model_combo.itemData(i) == VideoPrompter.DEFAULT_MODEL:
+                text_model_combo.setCurrentIndex(i)
+                break
+        else:
+            text_model_combo.setCurrentIndex(0)
+        out_row.addWidget(text_model_combo, 2)
+
+        grid.addLayout(out_row, 4, 0, 1, 3)
+
+        # --- Free-text narration steer ---
+        hint_label = QtWidgets.QLabel("Narration hint (optional):")
+        hint_label.setStyleSheet(lbl_css)
+        grid.addWidget(hint_label, 7, 0, 1, 3)
+
+        custom_hint = QtWidgets.QLineEdit()
+        custom_hint.setStyleSheet(
+            "background-color: #1a1a1a; color: #ffffff; padding: 5px; "
+            "border: 1px solid #444; border-radius: 3px;"
+        )
+        custom_hint.setPlaceholderText(
+            "e.g. cinematic film-noir tone · clinical and factual · "
+            "describe her from the viewer's POV · emphasise texture and fabric"
+        )
+        custom_hint.setMaxLength(400)
+        custom_hint.setToolTip(
+            "Free-text steering for how the description is written.\n\n"
+            "Folded into the caption request before the option lines, because\n"
+            "position drives register here — the same words appended last are\n"
+            "measurably weaker.\n\n"
+            "In video modes it also steers how the motion is worded, but it\n"
+            "never overrides the output format or the plausibility limits.\n"
+            "It is not applied to the MMAudio prompt, which has its own strict\n"
+            "format and a 77-token budget."
+        )
+        grid.addWidget(custom_hint, 8, 0, 1, 3)
+
+        audio_cb = QtWidgets.QCheckBox("🔊 Also write an MMAudio prompt")
+        audio_cb.setChecked(True)
+        audio_cb.setToolTip(
+            "Writes MMAudio conditioning for the same clip: a positive\n"
+            "soundscape description plus a negative prompt for exclusions.\n\n"
+            "Uses the text model that is already loaded for the motion stage,\n"
+            "so it costs a few seconds and no extra VRAM swap."
+        )
+        audio_cb.setStyleSheet("font-size: 10px;")
+        grid.addWidget(audio_cb, 9, 0, 1, 3)
+
+        vram_note = QtWidgets.QLabel(
+            "Video mode runs two models. On a 16 GB card they cannot both stay "
+            "resident, so the first image after switching pays a reload."
+        )
+        vram_note.setStyleSheet("color: #ffb366; font-size: 10px;")
+        vram_note.setWordWrap(True)
+        vram_note.setVisible(False)
+        grid.addWidget(vram_note, 5, 0, 1, 3)
+
+        def video_style() -> str:
+            return output_combo.currentData() or ""
+
+        def sync_output_mode() -> None:
+            is_video = bool(video_style())
+            for wdg in (duration_label, duration_spin, text_model_combo):
+                wdg.setVisible(is_video)
+            audio_cb.setVisible(is_video)
+            duration_spin.setEnabled(video_style() == "timeline")
+            duration_label.setEnabled(video_style() == "timeline")
+            vram_note.setVisible(is_video)
+
+        output_combo.currentIndexChanged.connect(sync_output_mode)
+        sync_output_mode()
+
+        layout.addWidget(settings)
+
+        # --- Results: list on the left, prompt on the right ---
+        split = QtWidgets.QSplitter(QtCore.Qt.Horizontal)
+        split.setChildrenCollapsible(False)
+
+        img_list = QtWidgets.QListWidget()
+        img_list.setStyleSheet("background-color: #0d0d0d; color: #ffffff;")
+        for _, name, _img in sources:
+            img_list.addItem(name)
+        img_list.setCurrentRow(min(self._current_index(), len(sources) - 1)
+                               if self._current_index() >= 0 else 0)
+        split.addWidget(img_list)
+
+        prompt_view = QtWidgets.QPlainTextEdit()
+        # Read-only on purpose. Copy and Save read from the result object, not
+        # from this widget, so an edit here would be silently discarded — and
+        # the view also carries labelled context (first frame, MMAudio) that is
+        # not part of any single copyable value. Selection and Ctrl+C still
+        # work, as does the right-click Copy / Select All menu.
+        prompt_view.setReadOnly(True)
+        # setReadOnly alone drops keyboard selection, which would break the
+        # obvious Ctrl+A / Ctrl+C gesture. Put both selection modes back.
+        prompt_view.setTextInteractionFlags(
+            QtCore.Qt.TextSelectableByMouse | QtCore.Qt.TextSelectableByKeyboard
+        )
+        prompt_view.setPlaceholderText(
+            "Select an image and click “Caption Selected”.\n\n"
+            "The first run loads several GB into VRAM and can take a minute; "
+            "after that each image takes a few seconds."
+        )
+        prompt_view.setStyleSheet(
+            "background-color: #0d0d0d; color: #d6e9ff; font-size: 12px; "
+            "border-radius: 5px; padding: 8px;"
+        )
+        split.addWidget(prompt_view)
+        split.setStretchFactor(0, 1)
+        split.setStretchFactor(1, 3)
+        split.setSizes([240, 700])
+        layout.addWidget(split, 1)
+
+        progress = QtWidgets.QProgressBar()
+        progress.setVisible(False)
+        layout.addWidget(progress)
+
+        status = QtWidgets.QLabel("")
+        status.setStyleSheet("color: #9ecbff; font-size: 10px;")
+        status.setWordWrap(True)
+        layout.addWidget(status)
+
+        # Captions accumulate here, keyed by the source index.
+        captions: dict[int, object] = {}
+
+        def result_text(result) -> str:
+            """The video prompt when one was requested, else the caption.
+
+            In video mode the caption is still shown underneath as the
+            first-frame description the motion was written from.
+            """
+            if getattr(result, "video_prompt", ""):
+                blocks = [result.video_prompt]
+                # A timeline that came up short would otherwise be silent —
+                # the video model would just get fewer seconds than asked.
+                beats = result.video_prompt.count("(At ")
+                wanted = getattr(result, "video_duration", 0)
+                if wanted and beats and beats < wanted:
+                    blocks.append(
+                        f"⚠️ {beats} of {wanted} beats — the model came up "
+                        "short. Re-run, or use a shorter clip length."
+                    )
+                if getattr(result, "audio_prompt", ""):
+                    blocks.append(
+                        "— 🔊 MMAudio prompt —\n"
+                        f"{result.audio_prompt}"
+                    )
+                    if result.audio_negative:
+                        blocks.append(
+                            "— 🔊 MMAudio negative prompt —\n"
+                            f"{result.audio_negative}"
+                        )
+                blocks.append(
+                    f"— first frame ({result.word_count} words) —\n{result.caption}"
+                )
+                return "\n\n".join(blocks)
+            if getattr(result, "video_style", ""):
+                # A video was requested but stage 2 produced nothing. Say so
+                # in the output itself, so a bare caption is never mistaken
+                # for the video prompt.
+                return (
+                    "⚠️ VIDEO PROMPT NOT GENERATED — the motion stage failed "
+                    "(see the warning). Only the first-frame caption is "
+                    "shown below.\n\n"
+                    f"— first frame ({result.word_count} words) —\n"
+                    f"{result.caption}"
+                )
+            return result.caption
+
+        def primary_text(result) -> str:
+            """Just the thing to copy — never the trailing context."""
+            return getattr(result, "video_prompt", "") or result.caption
+
+        def audio_file_text(result) -> str:
+            """MMAudio conditioning as a standalone file body."""
+            lines = [getattr(result, "audio_prompt", "")]
+            if getattr(result, "audio_negative", ""):
+                lines.append("")
+                lines.append(f"NEGATIVE: {result.audio_negative}")
+            return "\n".join(lines)
+
+        def show_selected() -> None:
+            row = img_list.currentRow()
+            if row < 0 or row >= len(sources):
+                return
+            idx = sources[row][0]
+            result = captions.get(idx)
+            if result is None:
+                prompt_view.setPlainText("")
+                prompt_view.setPlaceholderText(
+                    "Not captioned yet — click “Caption Selected”."
+                )
+            else:
+                prompt_view.setPlainText(result_text(result))
+            copy_audio_btn.setVisible(
+                bool(result is not None and getattr(result, "audio_prompt", ""))
+            )
+
+        img_list.currentRowChanged.connect(show_selected)
+
+        # --- Buttons ---
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.setSpacing(4)
+        caption_btn = QtWidgets.QPushButton("✨ Caption Selected")
+        caption_btn.setStyleSheet(
+            "background-color: #0059b3; color: white; font-weight: bold; "
+            "border-radius: 4px; padding: 6px;"
+        )
+        caption_all_btn = QtWidgets.QPushButton(f"✨ Caption All ({len(sources)})")
+        copy_btn = QtWidgets.QPushButton("📋 Copy")
+        copy_audio_btn = QtWidgets.QPushButton("🔊 Copy Audio")
+        copy_audio_btn.setToolTip(
+            "Copy the MMAudio prompt on its own.\n"
+            "Hold Shift to copy the negative prompt instead."
+        )
+        copy_audio_btn.setVisible(False)
+        save_btn = QtWidgets.QPushButton("💾 Save .txt")
+        save_all_btn = QtWidgets.QPushButton("💾 Save All")
+        close_btn = QtWidgets.QPushButton("Close")
+        for b in (
+            caption_btn, caption_all_btn, copy_btn, copy_audio_btn,
+            save_btn, save_all_btn,
+        ):
+            btn_row.addWidget(b)
+        btn_row.addStretch(1)
+        btn_row.addWidget(close_btn)
+        layout.addLayout(btn_row)
+
+        def set_busy(busy: bool) -> None:
+            for b in (caption_btn, caption_all_btn):
+                b.setEnabled(not busy)
+            progress.setVisible(busy)
+
+        def on_item_done(index: int, result) -> None:
+            captions[index] = result
+            row = img_list.currentRow()
+            if 0 <= row < len(sources) and sources[row][0] == index:
+                prompt_view.setPlainText(result_text(result))
+                copy_audio_btn.setVisible(bool(getattr(result, "audio_prompt", "")))
+            # Mark captioned items in the list.
+            for r, (idx, name, _i) in enumerate(sources):
+                if idx == index:
+                    img_list.item(r).setText(f"✓ {name}")
+                    break
+
+        def on_progress(pct: int, label: str) -> None:
+            progress.setValue(pct)
+            status.setText(label)
+
+        def release_worker() -> None:
+            """Drop the worker reference only once its OS thread has exited.
+
+            `finished` is emitted from inside run(), while the thread is still
+            alive. Dropping the last reference there lets Qt destroy a running
+            QThread, which crashes the process — so always wait() first.
+            """
+            w = self._vlm_worker
+            if w is None:
+                return
+            w.wait()
+            self._vlm_worker = None
+
+        def on_finished(results: list, failures: list) -> None:
+            set_busy(False)
+            if failures:
+                # A per-stage failure with a successful caption used to be
+                # invisible — the user saw a caption where a timeline should
+                # be and concluded video mode was broken.
+                status.setText(
+                    f"⚠️ {len(results)} captioned, but {len(failures)} stage(s) "
+                    "failed — see details."
+                )
+                QtWidgets.QMessageBox.warning(
+                    dlg,
+                    "Some stages failed",
+                    "The image caption succeeded, but a later stage did not:\n\n"
+                    + "\n".join(failures[:6])
+                    + (
+                        f"\n\n…and {len(failures) - 6} more." if len(failures) > 6 else ""
+                    )
+                    + "\n\nThe caption is kept. Check the stage-2 text model — "
+                    "it must be an instruction-following text model, not a "
+                    "vision captioner.",
+                )
+            else:
+                status.setText(
+                    f"✓ Captioned {len(results)} image(s). "
+                    "Re-run for a different phrasing."
+                )
+            release_worker()
+
+        def on_error(msg: str) -> None:
+            set_busy(False)
+            status.setText("")
+            QtWidgets.QMessageBox.warning(dlg, "Captioning failed", msg)
+            release_worker()
+
+        def start(items: list) -> None:
+            if self._vlm_worker is not None and self._vlm_worker.isRunning():
+                return
+            model = model_combo.currentData()
+            if not model:
+                QtWidgets.QMessageBox.warning(
+                    dlg, "No model", "Select a vision model first."
+                )
+                return
+            set_busy(True)
+            progress.setValue(0)
+            status.setText("Loading vision model (first run can take a minute)...")
+            w = VLMCaptionWorker(
+                items,
+                model,
+                style_combo.currentData(),
+                length_combo.currentData(),
+                extras=selected_extras(),
+                explicit=explicit_cb.isChecked(),
+                video_style=video_style(),
+                video_duration=duration_spin.value(),
+                text_model=text_model_combo.currentData() or "",
+                want_audio=audio_cb.isChecked(),
+                custom_instruction=custom_hint.text().strip(),
+            )
+            w.item_done.connect(on_item_done)
+            w.progress.connect(on_progress)
+            w.finished.connect(on_finished)
+            w.error.connect(on_error)
+            w.finished.connect(w.quit)
+            w.error.connect(w.quit)
+            # Held on self, not in a dialog-local closure: the dialog's widgets
+            # are destroyed when it closes, and a worker outliving that scope
+            # must still have a live Python reference.
+            self._vlm_worker = w
+            w.start()
+
+        def caption_selected() -> None:
+            row = img_list.currentRow()
+            if row < 0 or row >= len(sources):
+                return
+            idx, _name, image = sources[row]
+            start([(idx, image)])
+
+        def caption_all() -> None:
+            start([(idx, image) for idx, _n, image in sources])
+
+        def current_result():
+            row = img_list.currentRow()
+            if row < 0 or row >= len(sources):
+                return None
+            return captions.get(sources[row][0])
+
+        def copy_audio() -> None:
+            result = current_result()
+            if result is None:
+                return
+            shift = bool(
+                QtWidgets.QApplication.keyboardModifiers() & QtCore.Qt.ShiftModifier
+            )
+            text = (
+                getattr(result, "audio_negative", "")
+                if shift
+                else getattr(result, "audio_prompt", "")
+            )
+            if not text:
+                status.setText("No MMAudio prompt for this image yet.")
+                return
+            QtWidgets.QApplication.clipboard().setText(text)
+            status.setText(
+                "✓ Copied MMAudio " + ("negative prompt." if shift else "prompt.")
+            )
+
+        def copy_current() -> None:
+            result = current_result()
+            if result is None:
+                return
+            # Copy the prompt alone — never the first-frame context shown below it.
+            text = primary_text(result).strip()
+            if not text:
+                return
+            QtWidgets.QApplication.clipboard().setText(text)
+            status.setText(f"✓ Copied {len(text.split())} words to clipboard.")
+
+        def save_current() -> None:
+            row = img_list.currentRow()
+            result = current_result()
+            if row < 0 or result is None:
+                return
+            text = primary_text(result).strip()
+            if not text:
+                return
+            stem = Path(sources[row][1]).stem
+            suffix = "_video" if getattr(result, "video_prompt", "") else "_prompt"
+            path, _ = QtWidgets.QFileDialog.getSaveFileName(
+                dlg, "Save prompt", f"{stem}{suffix}.txt", "Text files (*.txt)"
+            )
+            if path:
+                body = text
+                if getattr(result, "audio_prompt", ""):
+                    body += f"\n\nMMAUDIO: {result.audio_prompt}"
+                    if result.audio_negative:
+                        body += f"\nMMAUDIO NEGATIVE: {result.audio_negative}"
+                Path(path).write_text(body, encoding="utf-8")
+                status.setText(f"✓ Saved {Path(path).name}")
+
+        def save_all() -> None:
+            if not captions:
+                QtWidgets.QMessageBox.information(
+                    dlg, "Nothing to save", "Caption some images first."
+                )
+                return
+            folder = QtWidgets.QFileDialog.getExistingDirectory(
+                dlg, "Save all prompts to folder"
+            )
+            if not folder:
+                return
+            written = 0
+            for idx, name, _img in sources:
+                result = captions.get(idx)
+                if result is None:
+                    continue
+                # Suffixed so these never overwrite tag captions, which use the
+                # bare "<stem>.txt" LoRA convention — and so video prompts do
+                # not overwrite image prompts for the same source.
+                stem = Path(name).stem
+                suffix = "_video" if getattr(result, "video_prompt", "") else "_prompt"
+                Path(folder, f"{stem}{suffix}.txt").write_text(
+                    primary_text(result), encoding="utf-8"
+                )
+                written += 1
+                # Audio goes to its own file — a batch feeding a pipeline wants
+                # them separable, not one blob to re-split.
+                if getattr(result, "audio_prompt", ""):
+                    Path(folder, f"{stem}_audio.txt").write_text(
+                        audio_file_text(result), encoding="utf-8"
+                    )
+                    written += 1
+            status.setText(f"✓ Saved {written} prompt file(s) to {folder}")
+
+        caption_btn.clicked.connect(caption_selected)
+        caption_all_btn.clicked.connect(caption_all)
+        copy_btn.clicked.connect(copy_current)
+        copy_audio_btn.clicked.connect(copy_audio)
+        save_btn.clicked.connect(save_current)
+        save_all_btn.clicked.connect(save_all)
+        close_btn.clicked.connect(dlg.accept)
+
+        # --- Session persistence of every setting in this dialog ---------
+        # Snapshot on close, restore on open. Combos are stored by their data
+        # value rather than index, so a model installed between two opens
+        # (which shifts the list) still restores the right selection.
+        def _select_data(combo: QtWidgets.QComboBox, value: object) -> None:
+            for i in range(combo.count()):
+                if combo.itemData(i) == value:
+                    combo.setCurrentIndex(i)
+                    return
+
+        def snapshot_settings() -> None:
+            try:
+                self._vlm_dialog_state = {
+                    "vision_model": model_combo.currentData(),
+                    "style": style_combo.currentData(),
+                    "length": length_combo.currentData(),
+                    "extras": {k: cb.isChecked() for k, cb in extra_boxes.items()},
+                    "explicit": explicit_cb.isChecked(),
+                    "output": output_combo.currentData(),
+                    "duration": duration_spin.value(),
+                    "text_model": text_model_combo.currentData(),
+                    "audio": audio_cb.isChecked(),
+                    "hint": custom_hint.text(),
+                }
+            except RuntimeError:
+                pass  # widgets already torn down; keep the previous snapshot
+
+        def restore_settings() -> None:
+            s = self._vlm_dialog_state
+            if not s:
+                return
+            if s.get("vision_model") is not None:
+                _select_data(model_combo, s["vision_model"])
+            if s.get("style") is not None:
+                _select_data(style_combo, s["style"])
+            if s.get("length") is not None:
+                _select_data(length_combo, s["length"])
+            for k, on in (s.get("extras") or {}).items():
+                if k in extra_boxes:
+                    extra_boxes[k].setChecked(bool(on))
+            # Explicit before keep_pg's exclusivity handler runs, so the
+            # restored pair cannot fight each other.
+            explicit_cb.setChecked(bool(s.get("explicit", False)))
+            if s.get("output") is not None:
+                _select_data(output_combo, s["output"])
+            if "duration" in s:
+                duration_spin.setValue(int(s["duration"]))
+            if s.get("text_model") is not None:
+                _select_data(text_model_combo, s["text_model"])
+            audio_cb.setChecked(bool(s.get("audio", True)))
+            custom_hint.setText(str(s.get("hint", "")))
+
+        def on_close() -> None:
+            """Detach the worker before this dialog's widgets are destroyed.
+
+            Any signal still queued would otherwise be delivered into deleted
+            C++ widgets and crash the process, so disconnect first, then ask
+            the worker to stop. If it is mid-image we deliberately do NOT drop
+            the reference — a running QThread must never be garbage collected.
+            """
+            snapshot_settings()
+            w = self._vlm_worker
+            if w is None:
+                return
+            for signal in (w.item_done, w.progress, w.finished, w.error):
+                try:
+                    signal.disconnect()
+                except (RuntimeError, TypeError):
+                    pass  # nothing connected
+            w.cancel()
+            if w.wait(3000):
+                self._vlm_worker = None
+            # Still running: the reference stays on self so Qt cannot destroy
+            # it mid-flight. It exits on its own now that it is cancelled, and
+            # its signals are already disconnected.
+
+        dlg.finished.connect(lambda _r: on_close())
+        # Restore after every widget and handler exists, so the change
+        # signals (output mode -> visibility, explicit -> keep_pg) fire
+        # against a fully built dialog.
+        restore_settings()
+        show_selected()
+        dlg.exec()
+
     def _show_model_manager(self) -> None:
         """Open a dialog to pull, list or delete Ollama models."""
 
@@ -3130,6 +4259,79 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
     # Entry point
     # ==================================================================
 
+def _build_splash_pixmap() -> QtGui.QPixmap:
+    """Draw the startup splash.
+
+    Painted rather than shipped as an asset so it survives PyInstaller builds
+    without extra --add-data wiring.
+    """
+    width, height = 520, 240
+    scale = 2  # render at 2x so it stays crisp on HiDPI displays
+    pixmap = QtGui.QPixmap(width * scale, height * scale)
+    pixmap.setDevicePixelRatio(scale)
+    pixmap.fill(QtCore.Qt.transparent)
+
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.Antialiasing)
+    painter.setRenderHint(QtGui.QPainter.TextAntialiasing)
+
+    card = QtCore.QRectF(0, 0, width, height)
+
+    gradient = QtGui.QLinearGradient(0, 0, 0, height)
+    gradient.setColorAt(0.0, QtGui.QColor("#16181d"))
+    gradient.setColorAt(1.0, QtGui.QColor("#0d0e11"))
+    painter.setBrush(QtGui.QBrush(gradient))
+    painter.setPen(QtGui.QPen(QtGui.QColor("#2b3038"), 1))
+    painter.drawRoundedRect(card.adjusted(0.5, 0.5, -0.5, -0.5), 12, 12)
+
+    # Accent bar, echoing the app's blue.
+    painter.setPen(QtCore.Qt.NoPen)
+    painter.setBrush(QtGui.QColor("#0073e6"))
+    painter.drawRoundedRect(QtCore.QRectF(0, 0, width, 4), 2, 2)
+
+    # Explicit family stack rather than painter.font(): the default font is
+    # not guaranteed to resolve in a frozen build, and an unresolved family
+    # renders every glyph as a tofu box.
+    families = ["Segoe UI", "Inter", "Helvetica Neue", "Arial", "DejaVu Sans"]
+
+    title_font = QtGui.QFont()
+    title_font.setFamilies(families)
+    title_font.setPointSize(26)
+    title_font.setBold(True)
+    painter.setFont(title_font)
+    painter.setPen(QtGui.QColor("#ffffff"))
+    painter.drawText(
+        QtCore.QRectF(0, 58, width, 44),
+        QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter,
+        "Img-Tagbooru",
+    )
+
+    sub_font = QtGui.QFont()
+    sub_font.setFamilies(families)
+    sub_font.setPointSize(10)
+    painter.setFont(sub_font)
+    painter.setPen(QtGui.QColor("#8fb8e6"))
+    painter.drawText(
+        QtCore.QRectF(0, 102, width, 24),
+        QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter,
+        "Local image tagging, captioning and prompt generation",
+    )
+
+    ver_font = QtGui.QFont()
+    ver_font.setFamilies(families)
+    ver_font.setPointSize(9)
+    painter.setFont(ver_font)
+    painter.setPen(QtGui.QColor("#6b7280"))
+    painter.drawText(
+        QtCore.QRectF(0, 126, width, 20),
+        QtCore.Qt.AlignHCenter | QtCore.Qt.AlignVCenter,
+        f"v{APP_VERSION}  ·  runs entirely on your machine",
+    )
+
+    painter.end()
+    return pixmap
+
+
 def main() -> None:
     # Windowed builds (pythonw / PyInstaller --windowed) run without a console,
     # so sys.stdout/sys.stderr are None. Libraries that write to them (tqdm,
@@ -3158,10 +4360,49 @@ def main() -> None:
     app = QtWidgets.QApplication([])
     app.setApplicationName("Img-Tagbooru")
     app.setApplicationDisplayName("Img-Tagbooru")
-    app.setApplicationVersion("1.3.4")
+    app.setApplicationVersion(APP_VERSION)
 
-    window = MainWindow()
-    window.show()
+    # Age confirmation and terms acceptance. Shown once, and again whenever
+    # TERMS_VERSION changes. Declining exits before anything else loads.
+    if tagger_backend.get_config_value("terms_accepted_version") != TERMS_VERSION:
+        terms = TermsDialog()
+        if terms.exec() != QtWidgets.QDialog.Accepted:
+            sys.exit(0)
+        tagger_backend.set_config_value("terms_accepted_version", TERMS_VERSION)
+        tagger_backend.set_config_value("terms_accepted_age_confirmed", True)
+
+    # Splash while the window builds. Construction is not instant — it wires up
+    # several tabs and probes Ollama for installed models — so without this the
+    # app looks hung for a second or two after launch.
+    splash = QtWidgets.QSplashScreen(
+        _build_splash_pixmap(), QtCore.Qt.WindowStaysOnTopHint
+    )
+    splash.setAttribute(QtCore.Qt.WA_TranslucentBackground)
+
+    def boot(message: str) -> None:
+        splash.showMessage(
+            f"  {message}",
+            QtCore.Qt.AlignBottom | QtCore.Qt.AlignHCenter,
+            QtGui.QColor("#9ecbff"),
+        )
+        app.processEvents()
+
+    splash.show()
+    boot("Starting…")
+
+    window = None
+    try:
+        window = MainWindow(progress_cb=boot)
+        boot("Ready")
+        window.show()
+    finally:
+        # finish() ties the splash to the window; close() covers the case where
+        # construction raised and there is no window to hand off to.
+        if window is not None:
+            splash.finish(window)
+        else:
+            splash.close()
+
     app.exec()
 
 
