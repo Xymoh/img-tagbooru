@@ -56,7 +56,7 @@ The source code is licensed under the MIT License and may be used, modified and 
 
 ## 8. Changes and contact
 
-These Terms may be updated when the Software changes. The version and date at the top identify the current Terms, and the Software will ask you to accept a changed version on the next launch. Questions and reports of misuse can be raised at <https://github.com/Xymoh/img-tagboru-ai/issues>.
+These Terms may be updated when the Software changes. The version and date at the top identify the current Terms, and the Software will ask you to accept a changed version on the next launch. Questions and reports of misuse can be raised at <https://github.com/Xymoh/img-tagbooru/issues>.
 
 ## 9. Governing law
 

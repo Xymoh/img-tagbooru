@@ -1136,7 +1136,7 @@ class MainWindow(QtWidgets.QMainWindow, CaptionCompleterMixin):
             "licences. Tag vocabulary: Danbooru (factual tag data).<br><br>"
             "Built with Python, PySide6 / Qt (LGPL-3.0) and ONNX Runtime.<br><br>"
             "☕ <a href='https://ko-fi.com/saekimon'>ko-fi.com/saekimon</a> &nbsp; "
-            "🐙 <a href='https://github.com/Xymoh/img-tagboru-ai'>github.com/Xymoh/img-tagboru-ai</a>"
+            "🐙 <a href='https://github.com/Xymoh/img-tagbooru'>github.com/Xymoh/img-tagbooru</a>"
         )
         terms_btn = box.addButton("Terms of Use", QtWidgets.QMessageBox.ActionRole)
         notices_btn = box.addButton("Third-party notices", QtWidgets.QMessageBox.ActionRole)

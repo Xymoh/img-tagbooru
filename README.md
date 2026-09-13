@@ -315,8 +315,8 @@ The raw LLM output goes through a deterministic pipeline that ensures quality:
 
 ```powershell
 # Clone the repo
-git clone https://github.com/Xymoh/img-tagboru-ai.git
-cd img-tagboru-ai
+git clone https://github.com/Xymoh/img-tagbooru.git
+cd img-tagbooru
 
 # Create virtual environment
 python -m venv .venv
@@ -547,7 +547,7 @@ These are not confirmed — just things being explored or considered for future 
 - **Optional online LLM support** — opt-in API key support for GPT-4o / Claude as an alternative to local Ollama for the Description Tagger
 - **App localization** — UI translation support for non-English users (long-term)
 
-Have a feature request? Open an issue on [GitHub](https://github.com/Xymoh/img-tagboru-ai/issues).
+Have a feature request? Open an issue on [GitHub](https://github.com/Xymoh/img-tagbooru/issues).
 
 ---
 

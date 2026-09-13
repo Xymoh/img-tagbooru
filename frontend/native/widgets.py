@@ -405,7 +405,7 @@ class HelpDialog(QtWidgets.QDialog):
         <hr style="border: 1px solid #444;">
         <p style="color: #9ecbff; font-size: 11px;">
             Need help? Check the
-            <a href="https://github.com/Xymoh/img-tagboru-ai" style="color: #4da6ff;">GitHub repository</a>
+            <a href="https://github.com/Xymoh/img-tagbooru" style="color: #4da6ff;">GitHub repository</a>
             or review the README.md file.
         </p>
         """)
@@ -468,7 +468,7 @@ TERMS_VERSION = "2026-09-13"
 _TERMS_FALLBACK = (
     "# Img-Tagbooru — Terms of Use\n\n"
     "The bundled TERMS.md could not be found. The current terms are published at\n"
-    "https://github.com/Xymoh/img-tagboru-ai/blob/main/TERMS.md\n\n"
+    "https://github.com/Xymoh/img-tagbooru/blob/main/TERMS.md\n\n"
     "In short: you must be 18 or older; the software is provided as is under the "
     "MIT License; you are responsible for the models you install and for complying "
     "with the law where you live; sexual content involving minors and non-consensual "

@@ -7,7 +7,7 @@ echo.
 echo Checking for latest release...
 
 powershell -Command ^
-  "$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Xymoh/img-tagboru-ai/releases/latest' -ErrorAction Stop; ^
+  "$release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Xymoh/img-tagbooru/releases/latest' -ErrorAction Stop; ^
    $asset = $release.assets | Where-Object { $_.name -eq 'Img-Tagbooru.exe' }; ^
    if ($asset) { ^
      Write-Host 'Latest release:' $release.tag_name; ^

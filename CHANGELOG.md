@@ -19,7 +19,7 @@ All notable changes to Img-Tagbooru are documented in this file.
 
 ### Changed
 - README: removed the Gemma 3 abliterated recommendation (Google's Gemma Prohibited Use Policy forbids sexually explicit output and circumventing its safety filters, so recommending it in this tool was recommending a terms violation); replaced "no content restrictions" wording; added a *Legal, privacy and attribution* section.
-- Fixed the repository URL in the About dialog, the help dialog, the README clone command and `update.bat` (was `img-tagbooru`, the repository is `img-tagboru-ai`). `update.bat` also now looks for `Img-Tagbooru.exe`, the name the CI workflow actually publishes.
+- `update.bat` now looks for `Img-Tagbooru.exe`, the asset name the CI workflow actually publishes (it looked for `img-tagger.exe`, so updates always failed). Links in the About dialog, help dialog and README now use the repository's current name, `Xymoh/img-tagbooru`.
 
 ## [v1.3.6] - 2026-09-09
 
