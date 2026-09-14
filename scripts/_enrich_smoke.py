@@ -1,4 +1,4 @@
-"""Quick smoke test for enrich_tags — 3 seed sets x 3 modes."""
+"""Quick smoke test for enrich_tags - 3 seed sets x 3 modes."""
 from __future__ import annotations
 import sys, time
 from pathlib import Path

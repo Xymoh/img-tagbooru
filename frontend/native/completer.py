@@ -12,14 +12,14 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# TagTrie — prefix tree for O(k) autocomplete lookups (not O(n) scan)
+# TagTrie - prefix tree for O(k) autocomplete lookups (not O(n) scan)
 # ---------------------------------------------------------------------------
 
 class TagTrie:
     """Prefix tree mapping *normalised* tag prefixes to original tag names.
 
     Building the trie is O(n × len) but done once at load time.
-    Each keystroke lookup is O(len(token)) — independent of tag count.
+    Each keystroke lookup is O(len(token)) - independent of tag count.
     """
 
     __slots__ = ("_roots", )
@@ -93,7 +93,7 @@ class TagTrie:
 
 
 # ---------------------------------------------------------------------------
-# CSV loader thread — avoids blocking the Qt main thread
+# CSV loader thread - avoids blocking the Qt main thread
 # ---------------------------------------------------------------------------
 
 class TagLoadWorker(QtCore.QThread):
@@ -129,7 +129,7 @@ class CaptionCompleterMixin:
 
     Requires the host class to define:
     - ``self.caption_edit``  (:class:`QtWidgets.QPlainTextEdit`)
-    - ``self.danbooru_tags`` (:class:`list[str]`) — set before calling
+    - ``self.danbooru_tags`` (:class:`list[str]`) - set before calling
       :meth:`_setup_caption_completer`.
     """
 

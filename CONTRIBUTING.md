@@ -31,7 +31,7 @@ pip install onnxruntime-gpu
 | `backend/tag_utils.py` | Shared data structures (`TaggingResult`), DataFrame helpers, AI metadata extraction |
 | `backend/description_tagger.py` | Description→tags via local LLM (Ollama), mature-mode enrichment |
 | `backend/api.py` | FastAPI endpoints (`/tag`, `/health`) for Vite integration |
-| `frontend/native/main_window.py` | PySide6 main window — all UI widgets, event handlers, and workflow orchestration |
+| `frontend/native/main_window.py` | PySide6 main window - all UI widgets, event handlers, and workflow orchestration |
 | `frontend/native/completer.py` | `TagTrie` prefix tree + `CaptionCompleterMixin` for Danbooru autocomplete |
 | `frontend/native/workers.py` | QThread workers for description tagging and image loading |
 | `frontend/native/styles.py` | Dark-theme Qt stylesheet, SVG icon generation |
@@ -60,7 +60,7 @@ python -m uvicorn backend.api:app --host 127.0.0.1 --port 8000 --reload
 ## Code Conventions
 
 - **Python 3.10+** with `from __future__ import annotations` in every file.
-- Use `logging` module — never `print()` for application output. Module-level logger:
+- Use `logging` module - never `print()` for application output. Module-level logger:
   ```python
   import logging
   logger = logging.getLogger(__name__)

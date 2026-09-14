@@ -293,7 +293,7 @@ def extract_ai_metadata(image: Image.Image) -> dict[str, str]:
                         params[key] = val
                         has_structured = True
         else:
-            # No Negative prompt boundary — try generic line-by-line
+            # No Negative prompt boundary - try generic line-by-line
             for line in lines:
                 line = line.strip()
                 if not line or line.startswith("{"):

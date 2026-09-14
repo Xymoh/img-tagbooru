@@ -24,7 +24,6 @@ _CATEGORY_KEYWORDS: dict[str, list[str]] = {
         "solo", "solo_focus", "no_humans",
         "male_focus", "female_focus",
         "couple", "trap", "futanari",
-        "loli", "shota", "child",
         "mature_female", "mature_male",
     ],
     "clothing": [
@@ -126,7 +125,7 @@ class TagFrequencyIndex:
     def _load(self, csv_path: str) -> None:
         """Parse the CSV and build the internal lookup structures."""
         if not os.path.exists(csv_path):
-            logger.warning("Tag frequency CSV not found at %s — index will be empty", csv_path)
+            logger.warning("Tag frequency CSV not found at %s - index will be empty", csv_path)
             return
 
         counts: dict[str, int] = {}
@@ -258,7 +257,7 @@ class TagFrequencyIndex:
         # Track how many matches per keyword we've collected
         keyword_counts: dict[str, int] = {kw.lower(): 0 for kw in keywords}
 
-        # Walk sorted tags once — O(N) single pass
+        # Walk sorted tags once - O(N) single pass
         for tag, count in self._sorted_tags:
             if count < min_count:
                 break  # rest are below threshold

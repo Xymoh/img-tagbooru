@@ -7,7 +7,7 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Temp-directory management — written once, cleaned up on exit
+# Temp-directory management - written once, cleaned up on exit
 # ---------------------------------------------------------------------------
 
 _TMP_DIR = Path(tempfile.gettempdir()) / "img-tagger-assets"

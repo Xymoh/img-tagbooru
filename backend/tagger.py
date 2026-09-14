@@ -13,6 +13,8 @@ from typing import Iterable, Sequence
 import numpy as np
 import onnxruntime as ort
 from huggingface_hub import hf_hub_download
+
+from backend.content_policy import is_blocked_minor_tag
 from PIL import Image
 
 
@@ -34,7 +36,7 @@ except Exception:
 MODEL_FILE = "model.onnx"
 TAGS_FILE = "selected_tags.csv"
 
-# Default recognition model — kept as the historical name for backward compat
+# Default recognition model - kept as the historical name for backward compat
 # (older code / configs may still reference ``MODEL_REPO``).
 DEFAULT_MODEL_REPO = "SmilingWolf/wd-swinv2-tagger-v3"
 MODEL_REPO = DEFAULT_MODEL_REPO
@@ -70,7 +72,7 @@ MODEL_REGISTRY: list[TaggerModelInfo] = [
         repo_id="SmilingWolf/wd-vit-tagger-v3",
         name="WD ViT v3",
         description=(
-            "Vision Transformer variant. Slightly faster, comparable quality — "
+            "Vision Transformer variant. Slightly faster, comparable quality - "
             "a good lightweight alternative to SwinV2."
         ),
         approx_size_mb=380,
@@ -80,7 +82,7 @@ MODEL_REGISTRY: list[TaggerModelInfo] = [
         name="WD ConvNeXt v3",
         description=(
             "ConvNeXt architecture. Different inductive biases than the ViT/Swin "
-            "models — useful for a second opinion on tricky images."
+            "models - useful for a second opinion on tricky images."
         ),
         approx_size_mb=400,
     ),
@@ -98,7 +100,7 @@ MODEL_REGISTRY: list[TaggerModelInfo] = [
         name="WD EVA02-Large v3",
         description=(
             "The most accurate model in the family. Largest download and slowest "
-            "inference — best for careful, high-quality single-image tagging."
+            "inference - best for careful, high-quality single-image tagging."
         ),
         approx_size_mb=1300,
     ),
@@ -166,6 +168,18 @@ def _save_config(config: dict) -> None:
         _config_path().write_text(json.dumps(config, indent=2), encoding="utf-8")
     except Exception as exc:  # pragma: no cover - best-effort persistence
         warnings.warn(f"Could not persist tagger config: {exc}", RuntimeWarning, stacklevel=2)
+
+
+def get_config_value(key: str, default=None):
+    """Read one persisted app setting from ~/.img_tagger/config.json."""
+    return _load_config().get(key, default)
+
+
+def set_config_value(key: str, value) -> None:
+    """Persist one app setting to ~/.img_tagger/config.json."""
+    config = _load_config()
+    config[key] = value
+    _save_config(config)
 
 
 def get_selected_model() -> str:
@@ -251,7 +265,7 @@ def is_model_downloaded(repo_id: str) -> bool:
 def download_model(repo_id: str) -> None:
     """Fetch the ONNX model + tags for *repo_id* into the local cache.
 
-    Blocking and potentially slow (hundreds of MB) — call from a worker thread.
+    Blocking and potentially slow (hundreds of MB) - call from a worker thread.
     """
     _remember_custom_model(repo_id)
     _download_model_file(MODEL_FILE, repo_id)
@@ -393,6 +407,9 @@ class AnimeTagger:
 
         for index, score in enumerate(scores[: len(self.tags)]):
             record = self.tags[index]
+            if is_blocked_minor_tag(record.name):
+                # Never emit sexual minor age-descriptors (see content_policy).
+                continue
             tag_name = record.name.replace("_", " ")
             prediction = TagPrediction(tag=tag_name, confidence=float(score), category=record.category)
             if record.category == 9:
@@ -456,7 +473,7 @@ def predict_tags(
     return tagger.predict(image, **kwargs)
 
 
-# Only the active model is kept resident — each ONNX session is large (RAM/VRAM),
+# Only the active model is kept resident - each ONNX session is large (RAM/VRAM),
 # so switching models evicts the previous one rather than accumulating them.
 _tagger_cache: dict[str, AnimeTagger] = {}
 

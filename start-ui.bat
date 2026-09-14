@@ -14,14 +14,14 @@ if %errorlevel% == 0 (
     exit /b 0
 )
 
-:: pythonw not available — try plain python (shows a console window)
+:: pythonw not available - try plain python (shows a console window)
 where python >nul 2>&1
 if %errorlevel% == 0 (
     start "" python "%~dp0run.py"
     exit /b 0
 )
 
-:: Nothing found — show an error the user can actually read
+:: Nothing found - show an error the user can actually read
 echo.
 echo ERROR: Python not found.
 echo.
