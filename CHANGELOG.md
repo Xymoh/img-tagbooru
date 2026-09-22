@@ -2,7 +2,7 @@
 
 All notable changes to Img-Tagbooru are documented in this file.
 
-## [v1.3.7] - 2026-09-13
+## [v1.3.7] - 2026-09-22
 
 ### Added
 
